@@ -60,9 +60,27 @@ import kotlinx.coroutines.launch
 import com.renotube.tv.ui.theme.YouTubeSurface
 import com.renotube.tv.ui.theme.YouTubeWhite
 
+import android.net.Uri
+import android.view.ViewGroup
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+import java.io.File
+
+@dagger.hilt.EntryPoint
+@dagger.hilt.InstallIn(dagger.hilt.components.SingletonComponent::class)
+interface VideoCardEntryPoint {
+    fun mediaRepository(): com.renotube.tv.data.repository.MediaRepository
+}
 
 @Composable
 fun VideoCard(
@@ -89,6 +107,79 @@ fun VideoCard(
     var keyDownTimeMs by remember { mutableStateOf(0L) }
     val cardFocusRequester = remember { FocusRequester() }
     val effectiveFocusRequester = focusRequester ?: cardFocusRequester
+
+    val context = LocalContext.current
+    val entryPoint = remember(context) {
+        try {
+            dagger.hilt.android.EntryPointAccessors.fromApplication(
+                context.applicationContext,
+                VideoCardEntryPoint::class.java
+            )
+        } catch (_: Exception) { null }
+    }
+    val mediaRepository = entryPoint?.mediaRepository()
+
+    var isPreviewPlaying by remember { mutableStateOf(false) }
+    var previewPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
+
+    LaunchedEffect(isFocused, video.videoId) {
+        if (!isFocused || video.videoId.isBlank() || mediaRepository == null) {
+            isPreviewPlaying = false
+            previewPlayer?.stop()
+            previewPlayer?.release()
+            previewPlayer = null
+            return@LaunchedEffect
+        }
+
+        // 5-second hover threshold: only start live preview if cursor rests on card for > 5s
+        delay(5000)
+
+        try {
+            val formatInfo = mediaRepository.getFormatInfo(video.videoId)
+            val progressiveUrls = formatInfo?.createUrlList()
+            val progressiveUrl = progressiveUrls?.firstOrNull { it.isNotEmpty() }
+            val hlsUrl = if (formatInfo?.containsHlsUrl() == true) formatInfo.hlsManifestUrl else null
+            val mpdFile = File(context.cacheDir, "manifest_${video.videoId}.mpd")
+
+            val player = ExoPlayer.Builder(context).build().apply {
+                volume = 0f // Muted live preview inside card modal
+                repeatMode = Player.REPEAT_MODE_ALL
+                playWhenReady = true
+            }
+
+            if (mpdFile.exists() && mpdFile.length() > 0) {
+                val mediaItem = MediaItem.Builder()
+                    .setUri(Uri.fromFile(mpdFile))
+                    .setMimeType(MimeTypes.APPLICATION_MPD)
+                    .build()
+                player.setMediaItem(mediaItem)
+            } else if (!progressiveUrl.isNullOrEmpty()) {
+                player.setMediaItem(MediaItem.fromUri(progressiveUrl))
+            } else if (!hlsUrl.isNullOrEmpty()) {
+                player.setMediaItem(MediaItem.fromUri(hlsUrl))
+            } else {
+                player.release()
+                return@LaunchedEffect
+            }
+
+            player.prepare()
+            previewPlayer = player
+            isPreviewPlaying = true
+        } catch (_: Exception) {
+            isPreviewPlaying = false
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                previewPlayer?.stop()
+                previewPlayer?.release()
+            } catch (_: Exception) {}
+            previewPlayer = null
+            isPreviewPlaying = false
+        }
+    }
 
     LaunchedEffect(isFocused) {
         if (isFocused) {
@@ -228,23 +319,43 @@ fun VideoCard(
                 )
                 .background(YouTubeSurface)
         ) {
-            val context = androidx.compose.ui.platform.LocalContext.current
-            val fallbackUrl = if (video.videoId.isNotBlank()) "https://i.ytimg.com/vi/${video.videoId}/hqdefault.jpg" else null
-            val imageTargetUrl = video.thumbnailUrl.ifBlank { fallbackUrl }
-            val imageRequest = remember(imageTargetUrl) {
-                coil.request.ImageRequest.Builder(context)
-                    .data(imageTargetUrl)
-                    .size(520, 293)
-                    .precision(coil.size.Precision.EXACT)
-                    .crossfade(100)
-                    .build()
+            if (isPreviewPlaying && previewPlayer != null) {
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            player = previewPlayer
+                            useController = false
+                            isFocusable = false
+                            isFocusableInTouchMode = false
+                            descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                            setShutterBackgroundColor(android.graphics.Color.BLACK)
+                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                        }
+                    },
+                    update = { view ->
+                        view.player = previewPlayer
+                        view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                val fallbackUrl = if (video.videoId.isNotBlank()) "https://i.ytimg.com/vi/${video.videoId}/hqdefault.jpg" else null
+                val imageTargetUrl = video.thumbnailUrl.ifBlank { fallbackUrl }
+                val imageRequest = remember(imageTargetUrl) {
+                    coil.request.ImageRequest.Builder(context)
+                        .data(imageTargetUrl)
+                        .size(520, 293)
+                        .precision(coil.size.Precision.EXACT)
+                        .crossfade(100)
+                        .build()
+                }
+                coil.compose.AsyncImage(
+                    model = imageRequest,
+                    contentDescription = video.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
             }
-            coil.compose.AsyncImage(
-                model = imageRequest,
-                contentDescription = video.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
 
             // Live Badge
             if (video.isLive) {

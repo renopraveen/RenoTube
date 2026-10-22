@@ -18,7 +18,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.renotube.tv.data.model.VideoCardModel
-import com.renotube.tv.ui.components.HeroBanner
 import com.renotube.tv.ui.components.SectionRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -162,29 +161,10 @@ fun HomeScreen(
                         },
                         onNavigateToSidebar = onNavigateToSidebar,
                         onDownPress = {
-                            currentFocusedRowIndex = 0
+                            currentFocusedRowIndex = 1
                             coroutineScope.launch { homeListState.animateScrollToItem(1, 0) }
                         },
                         firstChipFocusRequester = firstChipFocusRequester
-                    )
-                }
-
-                // 2. Top Hero Spotlight Item: Plays live preview video based on currently focused video
-                item {
-                    val previewVideo = viewModel.activePreviewVideo ?: uiState.featuredVideo
-                    HeroBanner(
-                        featuredVideo = previewVideo,
-                        mediaRepository = viewModel.mediaRepositoryRef,
-                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
-                        isEnabled = !isPlayerActive,
-                        onNavigateToSidebar = onNavigateToSidebar,
-                        onFocused = {
-                            currentFocusedRowIndex = 0
-                            coroutineScope.launch { homeListState.animateScrollToItem(1, 0) }
-                        },
-                        onClick = {
-                            previewVideo?.let { onVideoSelected(it) }
-                        }
                     )
                 }
 
