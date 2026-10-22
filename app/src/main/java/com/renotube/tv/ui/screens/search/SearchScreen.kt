@@ -222,7 +222,10 @@ fun SearchScreen(
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+                    try {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, java.util.Locale.getDefault().toLanguageTag())
+                    } catch (_: Exception) {}
                 }
                 speechRecognizer.startListening(intent)
                 isListening = true
@@ -501,6 +504,9 @@ private fun launchVoiceIntent(
 ) {
     val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        try {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, java.util.Locale.getDefault().toLanguageTag())
+        } catch (_: Exception) {}
         putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak into remote...")
     }
     try {
