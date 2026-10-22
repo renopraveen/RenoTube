@@ -74,16 +74,12 @@ class SearchViewModel @Inject constructor(
         }
     }
 
-    private var prefetchJob: kotlinx.coroutines.Job? = null
-
     fun prefetchVideo(videoId: String) {
-        if (videoId.isEmpty()) return
-        prefetchJob?.cancel()
-        prefetchJob = viewModelScope.launch(Dispatchers.IO) {
-            kotlinx.coroutines.delay(300)
+        if (videoId.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
             try {
                 mediaRepository.prefetchFormatInfo(videoId)
-            } catch (t: Throwable) {
+            } catch (_: Throwable) {
                 // best effort
             }
         }

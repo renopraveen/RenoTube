@@ -66,26 +66,58 @@ class HomeViewModel @Inject constructor(
     /**
      * Ensures every video tile appears at most ONCE across all rows on screen.
      * Prevents duplicate video tiles between Home shelves (e.g. Jump Back In, Most Played, and Recommendations).
+     * Also guarantees that no shelf has fewer than 2 videos (single-item shelves are merged into the top shelf).
      */
     private fun deduplicateSections(sections: List<SectionRowModel>): List<SectionRowModel> {
         val seen = HashSet<String>()
-        return sections.map { section ->
+        val result = mutableListOf<SectionRowModel>()
+        val orphanItems = mutableListOf<VideoCardModel>()
+
+        for (section in sections) {
             val uniqueItems = section.items.filter { video ->
                 if (video.videoId.isNotBlank()) seen.add(video.videoId) else true
             }
-            section.copy(items = uniqueItems)
-        }.filter { it.items.isNotEmpty() }
+            if (uniqueItems.size >= 2) {
+                result.add(section.copy(items = uniqueItems))
+            } else if (uniqueItems.isNotEmpty()) {
+                // If a section ended up with only 1 item, don't show an awkward 1-card row!
+                orphanItems.addAll(uniqueItems)
+            }
+        }
+
+        // Merge orphan items into the first shelf so no video is lost, but no 1-video row is displayed
+        if (orphanItems.isNotEmpty() && result.isNotEmpty()) {
+            val firstShelf = result[0]
+            val mergedFirstItems = (firstShelf.items + orphanItems).distinctBy { it.videoId }
+            result[0] = firstShelf.copy(items = mergedFirstItems)
+        } else if (result.isEmpty() && orphanItems.size >= 2) {
+            result.add(SectionRowModel(title = "Recommended", items = orphanItems))
+        }
+
+        return result
     }
 
     fun prefetchVideo(videoId: String) {
-        if (videoId.isEmpty()) return
-        prefetchJob?.cancel()
-        prefetchJob = viewModelScope.launch(Dispatchers.IO) {
-            kotlinx.coroutines.delay(300)
+        if (videoId.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
             try {
                 mediaRepository.prefetchFormatInfo(videoId)
-            } catch (t: Throwable) {
+            } catch (_: Throwable) {
                 // best effort prefetch
+            }
+        }
+    }
+
+    fun prefetchVideos(videoIds: List<String>) {
+        viewModelScope.launch(Dispatchers.IO) {
+            videoIds.take(4).forEach { id ->
+                if (id.isNotBlank()) {
+                    launch {
+                        try {
+                            mediaRepository.prefetchFormatInfo(id)
+                        } catch (_: Throwable) {}
+                    }
+                }
             }
         }
     }
@@ -120,6 +152,8 @@ class HomeViewModel @Inject constructor(
                     currentCategory = category
                 )
             }
+            val topCardIds = cached.firstOrNull()?.items?.take(4)?.map { it.videoId } ?: emptyList()
+            prefetchVideos(topCardIds)
         } else {
             _uiState.update {
                 it.copy(
@@ -261,9 +295,8 @@ class HomeViewModel @Inject constructor(
                             val featured = current.featuredVideo
                                 ?: combinedSections.firstOrNull()?.items?.firstOrNull()
 
-                            if (featured != null) {
-                                prefetchVideo(featured.videoId)
-                            }
+                            val topCardIds = combinedSections.firstOrNull()?.items?.take(4)?.map { it.videoId } ?: emptyList()
+                            prefetchVideos(topCardIds)
 
                             categoryCache[category] = combinedSections
 
@@ -295,9 +328,11 @@ class HomeViewModel @Inject constructor(
             userHistoryRepository.blockChannel(author)
             categoryCache.clear()
             _uiState.update { current ->
-                val updatedSections = current.sections.map { section ->
-                    section.copy(items = section.items.filter { it.author != author })
-                }.filter { it.items.isNotEmpty() }
+                val updatedSections = deduplicateSections(
+                    current.sections.map { section ->
+                        section.copy(items = section.items.filter { it.author != author })
+                    }
+                )
                 current.copy(
                     sections = updatedSections,
                     featuredVideo = if (current.featuredVideo?.author == author)
@@ -313,9 +348,11 @@ class HomeViewModel @Inject constructor(
             userHistoryRepository.hideVideo(videoId)
             categoryCache.clear()
             _uiState.update { current ->
-                val updatedSections = current.sections.map { section ->
-                    section.copy(items = section.items.filter { it.videoId != videoId })
-                }.filter { it.items.isNotEmpty() }
+                val updatedSections = deduplicateSections(
+                    current.sections.map { section ->
+                        section.copy(items = section.items.filter { it.videoId != videoId })
+                    }
+                )
                 current.copy(
                     sections = updatedSections,
                     featuredVideo = if (current.featuredVideo?.videoId == videoId)

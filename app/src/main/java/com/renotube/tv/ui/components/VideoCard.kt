@@ -78,7 +78,8 @@ fun VideoCard(
     onLeftBoundaryPress: (() -> Boolean)? = null,
     onRightBoundaryPress: (() -> Boolean)? = null,
     onUpBoundaryPress: (() -> Boolean)? = null,
-    onDownBoundaryPress: (() -> Boolean)? = null
+    onDownBoundaryPress: (() -> Boolean)? = null,
+    focusRequester: FocusRequester? = null
 ) {
     var isFocused by remember { mutableStateOf(false) }
     val animatedScale by animateFloatAsState(targetValue = if (isFocused) 1.05f else 1.0f)
@@ -87,6 +88,7 @@ fun VideoCard(
     var isLongPressTriggered by remember { mutableStateOf(false) }
     var keyDownTimeMs by remember { mutableStateOf(0L) }
     val cardFocusRequester = remember { FocusRequester() }
+    val effectiveFocusRequester = focusRequester ?: cardFocusRequester
 
     LaunchedEffect(isFocused) {
         if (isFocused) {
@@ -99,7 +101,7 @@ fun VideoCard(
             .width(cardWidth)
             .scale(animatedScale)
             .padding(6.dp)
-            .focusRequester(cardFocusRequester)
+            .focusRequester(effectiveFocusRequester)
             .onFocusChanged { 
                 isFocused = it.isFocused 
                 if (!it.isFocused) {

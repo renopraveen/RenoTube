@@ -105,7 +105,25 @@ fun SearchScreen(
     var spokenRms by remember { mutableStateOf(0f) }
     var isKeyboardMinimized by remember { mutableStateOf(false) }
     val keyboardFocusRequester = remember { FocusRequester() }
+    val firstResultFocusRequester = remember { FocusRequester() }
     val searchPaneWidth by animateDpAsState(targetValue = if (isKeyboardMinimized) 68.dp else 370.dp)
+
+    // Auto-focus the first search result whenever search results arrive or are refreshed
+    LaunchedEffect(uiState.searchResults, uiState.isSearching) {
+        if (uiState.searchResults.isNotEmpty() && !uiState.isSearching) {
+            isKeyboardMinimized = true
+            // Pre-warm top 3 search results immediately for instant playback
+            val topResults = uiState.searchResults.firstOrNull()?.items?.take(3)
+            topResults?.forEach { viewModel.prefetchVideo(it.videoId) }
+            for (attempt in 1..4) {
+                kotlinx.coroutines.delay(80)
+                try {
+                    firstResultFocusRequester.requestFocus()
+                    break
+                } catch (_: Exception) {}
+            }
+        }
+    }
 
     var selectedVideoForAction by remember { mutableStateOf<VideoCardModel?>(null) }
     var toastMessage by remember { mutableStateOf<String?>(null) }
@@ -144,6 +162,7 @@ fun SearchScreen(
         if (result.resultCode == Activity.RESULT_OK) {
             val spoken = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
             if (!spoken.isNullOrBlank()) {
+                isKeyboardMinimized = true
                 viewModel.onQueryChange(spoken)
                 viewModel.executeSearch(spoken)
             }
@@ -187,6 +206,7 @@ fun SearchScreen(
                         val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         val text = matches?.firstOrNull()
                         if (!text.isNullOrBlank()) {
+                            isKeyboardMinimized = true
                             viewModel.onQueryChange(text)
                             viewModel.executeSearch(text)
                         }
@@ -302,6 +322,7 @@ fun SearchScreen(
                     },
                     onSearch = {
                         if (uiState.query.isNotEmpty()) {
+                            isKeyboardMinimized = true
                             viewModel.executeSearch(uiState.query)
                         }
                     }
@@ -353,6 +374,7 @@ fun SearchScreen(
                             section = section,
                             rIndex = rIndex,
                             totalRows = totalRows,
+                            firstResultFocusRequester = if (rIndex == 0) firstResultFocusRequester else null,
                             onVideoClick = onVideoSelected,
                             onVideoLongClick = { selectedVideoForAction = it },
                             onVideoFocused = { cIndex, video ->
@@ -388,6 +410,7 @@ fun SearchScreen(
                         SearchPredictionItem(
                             prediction = suggestion,
                             onClick = {
+                                isKeyboardMinimized = true
                                 viewModel.onQueryChange(suggestion)
                                 viewModel.executeSearch(suggestion)
                             }
@@ -997,12 +1020,15 @@ private fun SearchSectionRow(
     section: SectionRowModel,
     rIndex: Int,
     totalRows: Int,
+    firstResultFocusRequester: FocusRequester? = null,
     onVideoClick: (VideoCardModel) -> Unit,
     onVideoLongClick: (VideoCardModel) -> Unit,
     onVideoFocused: (Int, VideoCardModel) -> Unit,
     onLeftFromFirstCard: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    if (section.items.isEmpty()) return
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -1028,6 +1054,7 @@ private fun SearchSectionRow(
                 VideoCard(
                     video = video,
                     cardWidth = 220.dp,
+                    focusRequester = if (cIndex == 0) firstResultFocusRequester else null,
                     onClick = { onVideoClick(video) },
                     onLongClick = { onVideoLongClick(video) },
                     onFocused = { onVideoFocused(cIndex, video) },

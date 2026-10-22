@@ -74,7 +74,7 @@ class MediaRepository @Inject constructor(
         }
     }
 
-    private val prefetchMutex = kotlinx.coroutines.sync.Mutex()
+    private val inFlightPrefetches = ConcurrentHashMap.newKeySet<String>()
 
     suspend fun getFormatInfo(videoId: String, clickTrackingParams: String? = null): MediaItemFormatInfo? =
         withContext(Dispatchers.IO) {
@@ -119,13 +119,14 @@ class MediaRepository @Inject constructor(
         }
 
     suspend fun prefetchFormatInfo(videoId: String) = withContext(Dispatchers.IO) {
+        if (videoId.isBlank()) return@withContext
         val cached = formatCache[videoId]
         val now = System.currentTimeMillis()
         if (cached != null && (now - cached.first) < CACHE_TTL_MS && !cached.second.isUnplayable) {
             return@withContext
         }
 
-        if (prefetchMutex.tryLock()) {
+        if (inFlightPrefetches.add(videoId)) {
             try {
                 if (!formatCache.containsKey(videoId)) {
                     val info = mediaItemService.getFormatInfo(videoId, null)
@@ -151,7 +152,7 @@ class MediaRepository @Inject constructor(
             } catch (t: Throwable) {
                 android.util.Log.w("MediaRepository", "prefetchFormatInfo error for $videoId: ${t.message}")
             } finally {
-                prefetchMutex.unlock()
+                inFlightPrefetches.remove(videoId)
             }
         }
     }

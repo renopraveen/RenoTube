@@ -317,8 +317,11 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="main-container">
         <div class="screen-pane" id="screenPane" tabindex="0">
             <div class="status-pill">
-                <div class="dot"></div>
+                <div class="dot" id="status-dot"></div>
                 <span id="status-text">Connected to Sony TV (192.168.1.4)</span>
+            </div>
+            <div id="playing-banner" style="display:none; position: absolute; top: 64px; z-index: 10; background: rgba(220, 20, 60, 0.9); padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
+                🎬 Video is playing on TV (Hardware Overlay). Press <kbd>Esc</kbd> / <kbd>Back</kbd> to return to Home, or click "⚡ Launch 60fps Native Mirror" for video on PC!
             </div>
             <div class="screen-wrapper">
                 <img id="tv-screen" src="/screen.jpg" alt="RenoTube TV Screen" />
@@ -453,15 +456,19 @@ HTML_PAGE = """<!DOCTYPE html>
             fetch('http://192.168.1.4:8080/api/player/status')
                 .then(r => r.json())
                 .then(data => {
+                    const banner = document.getElementById('playing-banner');
                     if (data.active) {
+                        if (banner) banner.style.display = 'block';
                         const curSec = Math.floor(data.positionMs / 1000);
                         const durSec = Math.floor(data.durationMs / 1000);
                         telemetry.innerHTML = `
-                            <div><strong>State:</strong> <span style="color:#00e676">Playing</span></div>
+                            <div><strong>State:</strong> <span style="color:#00e676">Playing on TV</span></div>
                             <div><strong>Video ID:</strong> ${data.videoId}</div>
                             <div><strong>Time:</strong> ${curSec}s / ${durSec}s</div>
+                            <button class="btn btn-primary" style="margin-top:8px; width:100%; justify-content:center;" onclick="sendKey(4)">↩ Exit to Home</button>
                         `;
                     } else {
+                        if (banner) banner.style.display = 'none';
                         telemetry.innerHTML = `<div><strong>State:</strong> Browsing Feed / Idle</div>`;
                     }
                 })

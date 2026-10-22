@@ -211,10 +211,10 @@ class RenoTubePlayer @Inject constructor(
     private val loadControl = DefaultLoadControl.Builder()
         .setAllocator(DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
         .setBufferDurationsMs(
-            /* minBufferMs = */ 8_000,
+            /* minBufferMs = */ 6_000,
             /* maxBufferMs = */ 20_000,
-            /* bufferForPlaybackMs = */ 400,
-            /* bufferForPlaybackAfterRebufferMs = */ 1_000
+            /* bufferForPlaybackMs = */ 250,
+            /* bufferForPlaybackAfterRebufferMs = */ 800
         )
         .setTargetBufferBytes(32 * 1024 * 1024)
         .setBackBuffer(1_500, false)
@@ -728,7 +728,7 @@ class RenoTubePlayer @Inject constructor(
             val now = System.currentTimeMillis()
             val mpdFiles = context.cacheDir.listFiles { _, name -> name.startsWith("manifest_") && name.endsWith(".mpd") }
             mpdFiles?.forEach { file ->
-                if (file.name != "manifest_${formatInfo.videoId}.mpd" || (now - file.lastModified()) > 15 * 60 * 1000L) {
+                if ((now - file.lastModified()) > 30 * 60 * 1000L) {
                     file.delete()
                 }
             }

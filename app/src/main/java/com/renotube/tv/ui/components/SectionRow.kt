@@ -30,7 +30,7 @@ fun SectionRow(
     onDownPress: (() -> Boolean)? = null,
     onLoadMore: () -> Unit = {}
 ) {
-    if (section.items.isEmpty()) return
+    if (section.items.size < 2) return
 
     Column(
         modifier = modifier
