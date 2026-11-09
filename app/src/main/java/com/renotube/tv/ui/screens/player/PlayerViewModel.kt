@@ -69,6 +69,9 @@ class PlayerViewModel @Inject constructor(
     private var currentFormatInfo: MediaItemFormatInfo? = null
     var currentLowResUrl: String? = null
         private set
+    private var loadVideoJob: kotlinx.coroutines.Job? = null
+    private var currentPlaybackRetryCount: Int = 0
+    private var hasAttemptedProgressiveFallback: Boolean = false
 
     val remoteActionFlow = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 1)
 
@@ -325,7 +328,7 @@ class PlayerViewModel @Inject constructor(
     init {
         // Fast time-to-first-frame: notify UI the exact millisecond video rendering begins
         renoTubePlayer.onFirstFrameRenderedListener = {
-            _uiState.update { it.copy(isFirstFrameRendered = true) }
+            _uiState.update { it.copy(isFirstFrameRendered = true, isLoading = false) }
         }
 
         // Smart Dynamic Surface & Resolution Controller: optimizes resolution when Ambilight is active
@@ -343,18 +346,40 @@ class PlayerViewModel @Inject constructor(
             }
         }
 
-        // Player error listener with automatic format failover
+        // Player error listener with automatic format failover and progressive fallback
         renoTubePlayer.onErrorListener = { error ->
-            Log.w(TAG, "Playback error caught in ViewModel: ${error.message}. Switching format...")
+            Log.w(TAG, "Playback error caught in ViewModel: ${error.message} (${error.errorCodeName}). Attempting automatic recovery...")
             val currentId = _uiState.value.videoId
             if (currentId.isNotEmpty()) {
                 viewModelScope.launch {
-                    try {
-                        java.io.File(context.cacheDir, "manifest_${currentId}.mpd").delete()
-                    } catch (_: Exception) {}
-                    mediaRepository.switchNextFormat(force = false)
-                    delay(300)
-                    loadVideo(currentId, retryCount = 1)
+                    mediaRepository.invalidateFormat(currentId)
+
+                    // 1. YouTube TV Fallback: Try Progressive MP4 fallback only once per video
+                    if (!hasAttemptedProgressiveFallback && currentFormatInfo != null) {
+                        hasAttemptedProgressiveFallback = true
+                        if (renoTubePlayer.playProgressiveFallback(currentFormatInfo)) {
+                            Log.i(TAG, "Attempting Progressive MP4 fallback for $currentId")
+                            _uiState.update { it.copy(isLoading = false, errorMessage = null) }
+                            return@launch
+                        }
+                    }
+
+                    // 2. Format / Client failover: Switch to next client format and retry
+                    if (currentPlaybackRetryCount < 3) {
+                        currentPlaybackRetryCount++
+                        Log.i(TAG, "Switching to next format client (attempt $currentPlaybackRetryCount) for $currentId")
+                        mediaRepository.switchNextFormat(force = true)
+                        delay(200)
+                        loadVideo(currentId, retryCount = currentPlaybackRetryCount)
+                    } else {
+                        mediaRepository.resetClientToDefault()
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                errorMessage = "Playback error: ${error.message ?: "Unable to play stream"}"
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -417,6 +442,11 @@ class PlayerViewModel @Inject constructor(
                 val isControlsVisible = _uiState.value.isOsdVisible
                 val playStateChanged = playing != _uiState.value.isPlaying || playWhenReady != _uiState.value.isPlayWhenReady
 
+                // Dismiss loading overlay as soon as playback starts or pos > 0
+                if ((playing || pos > 0L) && !_uiState.value.isFirstFrameRendered) {
+                    _uiState.update { it.copy(isFirstFrameRendered = true, isLoading = false) }
+                }
+
                 if (isControlsVisible || (now - lastUiUpdateTime >= 2000L) || playStateChanged) {
                     lastUiUpdateTime = now
                     _uiState.update {
@@ -476,7 +506,24 @@ class PlayerViewModel @Inject constructor(
         clickTrackingParams: String? = null,
         retryCount: Int = 0
     ) {
+        if (videoId.isBlank()) return
+
+        Log.i(TAG, "Loading video: $videoId (attempt $retryCount)")
+
+        currentPlaybackRetryCount = retryCount
+        if (retryCount == 0) {
+            hasAttemptedProgressiveFallback = false
+        } else {
+            mediaRepository.invalidateFormat(videoId)
+        }
+        loadVideoJob?.cancel()
+
+        // Immediately stop previous video & Ambilight to free hardware decoders, CPU & network
+        renoTubePlayer.stop()
+        cpuAmbilightEngine.stop()
+        mediaRepository.isPlaybackActive = false
         skippedSegmentKeys.clear()
+
         _uiState.update {
             it.copy(
                 videoId = videoId,
@@ -489,17 +536,9 @@ class PlayerViewModel @Inject constructor(
             )
         }
 
-        viewModelScope.launch {
+        loadVideoJob = viewModelScope.launch {
             try {
-                // Parallel asynchronous dispatch: start metadata & sponsor fetch concurrently
-                val metadataDeferred = async(Dispatchers.IO) {
-                    try { mediaRepository.getMetadata(videoId) } catch (e: Exception) { null }
-                }
-                val sponsorDeferred = async(Dispatchers.IO) {
-                    try { mediaRepository.getSponsorSegments(videoId) } catch (e: Exception) { emptyList() }
-                }
-
-                // 1. Resolve stream formats through SmartTube's MediaItemService
+                // 1. Resolve stream format FIRST with highest priority (0 network contention)
                 val formatInfo = mediaRepository.getFormatInfo(videoId, clickTrackingParams)
                 currentFormatInfo = formatInfo
                 val lowResUrl = mediaRepository.ambilightLowResUrl ?: mediaRepository.extractLowResVideoStreamUrl(formatInfo)
@@ -520,12 +559,19 @@ class PlayerViewModel @Inject constructor(
                         return@launch
                     } else {
                         mediaRepository.resetClientToDefault()
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                errorMessage = "This video is unavailable or restricted on this device."
+                            )
+                        }
+                        return@launch
                     }
                 }
 
-                // 2. Start playback IMMEDIATELY without waiting for metadata
-                if (formatInfo != null) {
-                    renoTubePlayer.playFormatInfo(formatInfo)
+                // 2. Start ExoPlayer playback IMMEDIATELY
+                val playSuccess = renoTubePlayer.playFormatInfo(formatInfo)
+                if (playSuccess) {
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -533,91 +579,122 @@ class PlayerViewModel @Inject constructor(
                         )
                     }
                     if (ambilightConfig.value.enabled && !lowResUrl.isNullOrBlank()) {
-                        cpuAmbilightEngine.start(renoTubePlayer.exoPlayer, lowResUrl)
+                        viewModelScope.launch {
+                            kotlinx.coroutines.delay(800) // Give main 4K player 800ms uninterrupted CPU & Wi-Fi priority to render 1st frame instantly
+                            if (renoTubePlayer.isPlaying || _uiState.value.isFirstFrameRendered) {
+                                cpuAmbilightEngine.start(renoTubePlayer.exoPlayer, lowResUrl)
+                            }
+                        }
                     }
                 } else {
-                    _uiState.update { it.copy(isLoading = false, errorMessage = "No playable stream found for $videoId") }
+                    if (retryCount < 2) {
+                        Log.w(TAG, "No usable streams in format for $videoId. Switching format (attempt $retryCount)...")
+                        mediaRepository.switchNextFormat(force = true)
+                        loadVideo(
+                            videoId = videoId,
+                            title = title,
+                            author = author,
+                            thumbnailUrl = thumbnailUrl,
+                            clickTrackingParams = clickTrackingParams,
+                            retryCount = retryCount + 1
+                        )
+                        return@launch
+                    } else {
+                        mediaRepository.resetClientToDefault()
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                errorMessage = "Unable to extract playable stream streams for this video."
+                            )
+                        }
+                        return@launch
+                    }
                 }
 
-                // 3. Await metadata and SponsorBlock concurrently
-                val rawMetadata = metadataDeferred.await()
-                val sponsorSegments = sponsorDeferred.await()
+                // 3. Fetch metadata, SponsorBlock & recommendations in background after giving ExoPlayer full priority to paint frame 1
+                viewModelScope.launch(Dispatchers.IO) {
+                    var waited = 0
+                    while (waited < 1500 && !_uiState.value.isFirstFrameRendered) {
+                        kotlinx.coroutines.delay(100)
+                        waited += 100
+                    }
 
-                // Ensure relevant Up Next suggestions based on current video: minimum 30 cards for 3 rows x 10 cards
-                val baseMetadata = if (rawMetadata != null && rawMetadata.suggestions.size < 30) {
-                    try {
-                        val cloudRecs: List<com.renotube.tv.data.model.VideoCardModel> = if (contentRepository.isUserSignedIn) {
-                            try {
-                                kotlinx.coroutines.withTimeoutOrNull(2500) {
-                                    contentRepository.getRecommendedFlow().firstOrNull()?.items
-                                } ?: emptyList()
-                            } catch (_: Exception) { emptyList() }
-                        } else emptyList()
+                    val rawMetadata = try { mediaRepository.getMetadata(videoId) } catch (e: Exception) { null }
+                    val sponsorSegments = if (_sponsorBlockEnabled.value) {
+                        try { mediaRepository.getSponsorSegments(videoId) } catch (e: Exception) { emptyList() }
+                    } else emptyList()
 
-                        val query = if (rawMetadata.author.isNotBlank()) "${rawMetadata.author} ${rawMetadata.title}" else rawMetadata.title
-                        val relatedRows = if ((rawMetadata.suggestions + cloudRecs).size < 30) {
-                            try { contentRepository.search(query) } catch (_: Exception) { emptyList() }
-                        } else emptyList()
+                    val baseMetadata = if (rawMetadata != null && rawMetadata.suggestions.size < 30) {
+                        try {
+                            val cloudRecs: List<com.renotube.tv.data.model.VideoCardModel> = if (contentRepository.isUserSignedIn) {
+                                try {
+                                    kotlinx.coroutines.withTimeoutOrNull(2000) {
+                                        contentRepository.getRecommendedFlow().firstOrNull()?.items
+                                    } ?: emptyList()
+                                } catch (_: Exception) { emptyList() }
+                            } else emptyList()
 
-                        val extraCards: List<com.renotube.tv.data.model.VideoCardModel> = (cloudRecs + relatedRows.flatMap { it.items }).filter { it.videoId != videoId }
-                        val merged = (rawMetadata.suggestions + extraCards).distinctBy { it.videoId }
+                            val query = if (rawMetadata.author.isNotBlank()) "${rawMetadata.author} ${rawMetadata.title}" else rawMetadata.title
+                            val relatedRows = if ((rawMetadata.suggestions + cloudRecs).size < 30) {
+                                try { contentRepository.search(query) } catch (_: Exception) { emptyList() }
+                            } else emptyList()
 
-                        val row1 = merged.take(10)
-                        val row2 = merged.drop(10).take(10)
-                        val row3 = merged.drop(20).take(10)
+                            val extraCards: List<com.renotube.tv.data.model.VideoCardModel> = (cloudRecs + relatedRows.flatMap { it.items }).filter { it.videoId != videoId }
+                            val merged = (rawMetadata.suggestions + extraCards).distinctBy { it.videoId }
+
+                            val row1 = merged.take(10)
+                            val row2 = merged.drop(10).take(10)
+                            val row3 = merged.drop(20).take(10)
+                            val newSections = mutableListOf<com.renotube.tv.data.model.SectionRowModel>()
+                            if (row1.isNotEmpty()) newSections.add(com.renotube.tv.data.model.SectionRowModel(title = "Up Next", items = row1))
+                            if (row2.isNotEmpty()) newSections.add(com.renotube.tv.data.model.SectionRowModel(title = if (rawMetadata.author.isNotBlank()) "More from ${rawMetadata.author}" else "Related Videos", items = row2))
+                            if (row3.isNotEmpty()) newSections.add(com.renotube.tv.data.model.SectionRowModel(title = "Recommended for You", items = row3))
+
+                            rawMetadata.copy(suggestions = merged, suggestionSections = newSections)
+                        } catch (e: Exception) {
+                            rawMetadata
+                        }
+                    } else rawMetadata
+
+                    val queued = playbackQueueManager.getQueue()
+                    val metadata = if (baseMetadata != null && queued.isNotEmpty()) {
+                        val combined = (queued + baseMetadata.suggestions).distinctBy { it.videoId }
+                        val row1 = combined.take(10)
+                        val row2 = combined.drop(10).take(10)
+                        val row3 = combined.drop(20).take(10)
                         val newSections = mutableListOf<com.renotube.tv.data.model.SectionRowModel>()
                         if (row1.isNotEmpty()) newSections.add(com.renotube.tv.data.model.SectionRowModel(title = "Up Next", items = row1))
-                        if (row2.isNotEmpty()) newSections.add(com.renotube.tv.data.model.SectionRowModel(title = if (rawMetadata.author.isNotBlank()) "More from ${rawMetadata.author}" else "Related Videos", items = row2))
+                        if (row2.isNotEmpty()) newSections.add(com.renotube.tv.data.model.SectionRowModel(title = if (baseMetadata.author.isNotBlank()) "More from ${baseMetadata.author}" else "Related Videos", items = row2))
                         if (row3.isNotEmpty()) newSections.add(com.renotube.tv.data.model.SectionRowModel(title = "Recommended for You", items = row3))
 
-                        rawMetadata.copy(suggestions = merged, suggestionSections = newSections)
-                    } catch (e: Exception) {
-                        rawMetadata
-                    }
-                } else rawMetadata
+                        baseMetadata.copy(suggestions = combined, suggestionSections = newSections)
+                    } else baseMetadata
 
-                val queued = playbackQueueManager.getQueue()
-                val metadata = if (baseMetadata != null && queued.isNotEmpty()) {
-                    val combined = (queued + baseMetadata.suggestions).distinctBy { it.videoId }
-                    val row1 = combined.take(10)
-                    val row2 = combined.drop(10).take(10)
-                    val row3 = combined.drop(20).take(10)
-                    val newSections = mutableListOf<com.renotube.tv.data.model.SectionRowModel>()
-                    if (row1.isNotEmpty()) newSections.add(com.renotube.tv.data.model.SectionRowModel(title = "Up Next", items = row1))
-                    if (row2.isNotEmpty()) newSections.add(com.renotube.tv.data.model.SectionRowModel(title = if (baseMetadata.author.isNotBlank()) "More from ${baseMetadata.author}" else "Related Videos", items = row2))
-                    if (row3.isNotEmpty()) newSections.add(com.renotube.tv.data.model.SectionRowModel(title = "Recommended for You", items = row3))
-
-                    baseMetadata.copy(suggestions = combined, suggestionSections = newSections)
-                } else baseMetadata
-
-                _uiState.update {
-                    it.copy(
-                        metadata = metadata,
-                        sponsorSegments = sponsorSegments
-                    )
-                }
-
-                // Record in viewing algorithm history for personalized Home Screen
-                if (metadata != null) {
-                    viewModelScope.launch(Dispatchers.IO) {
-                        userHistoryRepository.recordView(
-                            videoId = videoId,
-                            title = metadata.title,
-                            author = metadata.author,
-                            thumbnailUrl = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg",
-                            durationText = ""
+                    _uiState.update {
+                        it.copy(
+                            metadata = metadata,
+                            sponsorSegments = sponsorSegments
                         )
                     }
-                }
 
-                // 4. Background prefetch the next video's format after current video buffers
-                val nextCandidate = metadata?.nextVideo ?: metadata?.suggestions?.firstOrNull()
-                if (nextCandidate != null && nextCandidate.videoId.isNotEmpty()) {
-                    viewModelScope.launch(Dispatchers.IO) {
+                    if (metadata != null) {
                         try {
-                            delay(15000)
+                            userHistoryRepository.recordView(
+                                videoId = videoId,
+                                title = metadata.title,
+                                author = metadata.author,
+                                thumbnailUrl = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg",
+                                durationText = ""
+                            )
+                        } catch (_: Exception) {}
+                    }
+
+                    // 4. Background prefetch the next video's format after current video buffers
+                    val nextCandidate = metadata?.nextVideo ?: metadata?.suggestions?.firstOrNull()
+                    if (nextCandidate != null && nextCandidate.videoId.isNotEmpty()) {
+                        try {
+                            delay(3000) // 3 seconds is optimal: main stream is buffered, prewarms next candidate
                             mediaRepository.prefetchFormatInfo(nextCandidate.videoId)
-                            Log.d(TAG, "Prefetched next video format: ${nextCandidate.videoId}")
                         } catch (e: Exception) {
                             Log.w(TAG, "Failed to prefetch next format: ${e.message}")
                         }
@@ -648,7 +725,7 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun prefetchVideo(videoId: String) {
-        if (videoId.isEmpty()) return
+        if (videoId.isEmpty() || loadVideoJob?.isActive == true) return
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 mediaRepository.prefetchFormatInfo(videoId)
@@ -659,10 +736,12 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun stopPlayback() {
+        loadVideoJob?.cancel()
         val posSec = renoTubePlayer.currentPositionMs / 1000f
         val durSec = renoTubePlayer.durationMs / 1000f
         syncWatchHistoryToYouTube(posSec, durSec)
         Log.i(TAG, "Stopping video playback and resetting UI state")
+        mediaRepository.isPlaybackActive = false // Restore predictive background prefetching when returning to home/browsing
         skippedSegmentKeys.clear()
         currentFormatInfo = null
         currentLowResUrl = null
@@ -788,6 +867,7 @@ class PlayerViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         cpuAmbilightEngine.stop()
+        mediaRepository.isPlaybackActive = false
         // Do NOT release the player here — it's a singleton managed by Hilt
     }
 }

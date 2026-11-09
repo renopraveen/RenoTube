@@ -27,15 +27,12 @@ internal class WebPlayerDataExtractor(override val playerUrl: String): PlayerDat
             //.replace("-tcl", "") // (403 fix, incompatible nParam, e.g. /tv-player-es6-tcl.vflset/tv-player-es6-tcl.js)
     }
 
+
     init {
-        // Get the code from the cache
         restoreAllData()
-        checkSigData()
-        checkCpnData()
 
         if (signatureTimestamp == null) {
             fetchAllData()
-            checkCpnData()
             persistAllData()
         }
     }
@@ -77,9 +74,7 @@ internal class WebPlayerDataExtractor(override val playerUrl: String): PlayerDat
     }
 
     override fun validate(): Boolean {
-        // TODO: fix cpn code
-        // return mNFuncCode && mSigFuncCode && mCPNCode != null && mSignatureTimestamp != null
-        return nFuncCode && sFuncCode && signatureTimestamp != null
+        return signatureTimestamp != null
     }
 
     private fun extractNSigReal(nParam: String): String? {
@@ -94,6 +89,7 @@ internal class WebPlayerDataExtractor(override val playerUrl: String): PlayerDat
         if (Helpers.allNulls(nParams, sParams)) {
             return Pair(null, null)
         }
+        checkSigData()
 
         var nProcessed: List<String?>? = null
         var sProcessed: List<String?>? = null

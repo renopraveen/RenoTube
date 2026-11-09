@@ -268,7 +268,7 @@ class WebRemoteServer @Inject constructor(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>RenoTube TV Remote</title>
+<title>FreeTube TV Remote</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body {
@@ -493,7 +493,7 @@ class WebRemoteServer @Inject constructor(
 <body>
 
 <div class="header">
-  <h1>▶ RenoTube</h1>
+  <h1>▶ FreeTube</h1>
   <span>TV Remote</span>
 </div>
 

@@ -743,7 +743,7 @@ private fun AmbilightSettings(
 private fun WebRemoteSettings(viewModel: SettingsViewModel) {
     SettingsDetailHeader(
         title = "Mobile & Web Remote Control",
-        subtitle = "Control RenoTube TV and type using your phone's keyboard"
+        subtitle = "Control FreeTube and type using your phone's keyboard"
     )
 
     SettingsDetailCard {
@@ -1088,7 +1088,7 @@ private fun AboutDeviceSettings() {
 
     SettingsDetailHeader(
         title = "About & Diagnostics",
-        subtitle = "RenoTube TV Leanback Edition • Real-Time Diagnostics & Latency Monitor"
+        subtitle = "FreeTube TV Leanback Edition • Real-Time Diagnostics & Latency Monitor"
     )
 
     SettingsDetailCard {

@@ -25,14 +25,16 @@ import retrofit2.Call;
 public class VideoInfoService extends VideoInfoServiceBase {
     private static final String TAG = VideoInfoService.class.getSimpleName();
     private static final AppClient IOS_CLIENT = AppClient.VISIONOS;
-    private static final AppClient TV_CLIENT = AppClient.TV_DOWNGRADED;
+    private static final AppClient TV_CLIENT = AppClient.TV;
     private static final AppClient WEB_CLIENT = AppClient.WEB_EMBED;
     private static VideoInfoService sInstance;
     private final VideoInfoApi mVideoInfoApi;
-    // Prioritize fast non-tcl clients to eliminate 10s BotGuard WebView lockup
+    // Prioritize fast unthrottled clients without BotGuard WebView delay or unplayable errors
     private final static AppClient[] VIDEO_INFO_TYPE_LIST = {
-            AppClient.TV_DOWNGRADED, // Ultra-fast direct DASH formats without BotGuard WebView delay
-            AppClient.VISIONOS,      // Direct 4K/HDR VisionOS stream formats
+            AppClient.ANDROID_VR,    // Direct Quest 3 client: Status=OK, 26 adaptive streams with direct URLs up to 4K, zero BotGuard, zero cipher
+            AppClient.TV_DOWNGRADED, // Official SmartTube Cobalt TV client: Direct 4K DASH streams with zero TCL delay
+            AppClient.ANDROID,       // Direct Android mobile client: Status=OK, 29 streams + progressive MP4
+            AppClient.VISIONOS,      // Direct VisionOS format: 4K/1080p HLS and adaptive DASH
             AppClient.WEB_SAFARI,    // Direct fast Safari format
             AppClient.IOS,           // Direct Apple HLS streams (works on licensed music videos)
             AppClient.MWEB,          // Lightweight mobile web format
@@ -83,6 +85,7 @@ public class VideoInfoService extends VideoInfoServiceBase {
         persistRecentTypeIfNeeded(result);
 
         mIsUnplayable = result.isUnplayable();
+        mNextInfoType = null; // Always reset trial state so next video starts clean with ANDROID_VR
 
         return result;
     }
@@ -109,7 +112,7 @@ public class VideoInfoService extends VideoInfoServiceBase {
     }
 
     private VideoInfo firstInfoWith(String videoId, String clickTrackingParams, InfoTester infoTester) {
-        //final AppClient beginType = getDefaultClient();
+        // Fast path: always start with ANDROID_VR unless explicitly switching client
         final AppClient beginType = mNextInfoType != null ? mNextInfoType : VIDEO_INFO_TYPE_LIST[0];
         AppClient nextType = beginType;
 
@@ -117,6 +120,7 @@ public class VideoInfoService extends VideoInfoServiceBase {
             VideoInfo result = getVideoInfoWithRentFix(nextType, videoId, clickTrackingParams);
 
             if (result != null && infoTester.test(result)) {
+                mActualInfoType = nextType;
                 return result;
             }
 
@@ -235,15 +239,12 @@ public class VideoInfoService extends VideoInfoServiceBase {
 
         boolean oldUseAuth = mUseAuth;
 
-        if (shouldObtainExtendedFormats(result) || result.isStoryboardBroken()) {
+        if (shouldObtainExtendedFormats(result)) {
             Log.d(TAG, "Enable high bitrate formats...");
             mUseAuth = false;
             VideoInfoHls videoInfoHls = getVideoInfoIOSHls(videoId, clickTrackingParams);
-            if (videoInfoHls != null && shouldObtainExtendedFormats(result)) {
+            if (videoInfoHls != null) {
                 result.setHlsManifestUrl(videoInfoHls.getHlsManifestUrl());
-            }
-            if (videoInfoHls != null && result.isStoryboardBroken()) {
-                result.setStoryboardSpec(videoInfoHls.getStoryboardSpec());
             }
         }
 
@@ -272,7 +273,7 @@ public class VideoInfoService extends VideoInfoServiceBase {
         mUseAuth = oldUseAuth;
     }
 
-    private void resetInfoTypeToDefault() {
+    public void resetInfoTypeToDefault() {
         mNextInfoType = null;
         mActualInfoType = VIDEO_INFO_TYPE_LIST[0];
         persistVideoInfoType();

@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">RenoTube</string>
+    <string name="app_name">FreeTube</string>
     <string name="search_hint">Search YouTube...</string>
     <string name="nav_home">Home</string>
     <string name="nav_search">Search</string>

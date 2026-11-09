@@ -1,7 +1,7 @@
 package com.renotube.tv.ambilight
 
 data class AmbilightConfig(
-    val enabled: Boolean = true,
+    val enabled: Boolean = false,
     val wledIp: String = "192.168.1.6",
     val wledPort: Int = 4048, // 4048: DDP (Default), 21324: WLED DRGB protocol
     val wledDeviceName: String = "WLED Lightstrip",
