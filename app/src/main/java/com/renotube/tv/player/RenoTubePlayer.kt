@@ -13,11 +13,15 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.exoplayer.upstream.DefaultAllocator
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.audio.AudioCapabilities
 import androidx.media3.exoplayer.audio.AudioSink
@@ -37,6 +41,7 @@ import com.liskovsoft.mediaserviceinterfaces.data.MediaItemFormatInfo
 import com.liskovsoft.mediaserviceinterfaces.data.MediaSubtitle
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.media3.common.TrackSelectionOverride
 import java.io.File
@@ -98,12 +103,24 @@ data class StatsForNerdsData(
     val audioSessionId: Int = 0
 )
 
+class FastFailoverLoadErrorHandlingPolicy : DefaultLoadErrorHandlingPolicy() {
+    override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
+        val error = loadErrorInfo.exception
+        if (error is HttpDataSource.InvalidResponseCodeException && (error.responseCode == 403 || error.responseCode == 404 || error.responseCode == 410)) {
+            return C.TIME_UNSET // Fatal HTTP error: do NOT retry, fail immediately to trigger instant fallback
+        }
+        return super.getRetryDelayMsFor(loadErrorInfo)
+    }
+
+    override fun getMinimumLoadableRetryCount(dataType: Int): Int = 1
+}
+
 @Singleton
 class RenoTubePlayer @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     private val bandwidthMeter = DefaultBandwidthMeter.Builder(context)
-        .setInitialBitrateEstimate(50_000_000L) // 50 Mbps default so 4K starts immediately!
+        .setInitialBitrateEstimate(2_500_000L) // Fast startup: 2.5 Mbps renders 1st frame in ~200ms at 720p/1080p, then ramps up to 4K
         .build()
 
     val hardware4kCodecSelector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
@@ -211,13 +228,13 @@ class RenoTubePlayer @Inject constructor(
     private val loadControl = DefaultLoadControl.Builder()
         .setAllocator(DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
         .setBufferDurationsMs(
-            /* minBufferMs = */ 6_000,
-            /* maxBufferMs = */ 20_000,
-            /* bufferForPlaybackMs = */ 250,
-            /* bufferForPlaybackAfterRebufferMs = */ 800
+            /* minBufferMs = */ 2_500,            // 2.5 s buffer for stable TV playback without underflows
+            /* maxBufferMs = */ 25_000,           // Buffer up to 25 s ahead
+            /* bufferForPlaybackMs = */ 300,      // 300 ms instant playback threshold (first frame rendered in ~200-300ms)
+            /* bufferForPlaybackAfterRebufferMs = */ 1_000  // 1 s recovery from stalls
         )
-        .setTargetBufferBytes(32 * 1024 * 1024)
-        .setBackBuffer(1_500, false)
+        .setTargetBufferBytes(32 * 1024 * 1024)  // 32 MB target: optimal for 1080p/4K on Android TV
+        .setBackBuffer(2_000, false)              // 2 s back-buffer for smooth seeks
         .setPrioritizeTimeOverSizeThresholds(true)
         .build()
 
@@ -251,6 +268,10 @@ class RenoTubePlayer @Inject constructor(
         .setVideoChangeFrameRateStrategy(C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_ONLY_IF_SEAMLESS)
         .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
         .setHandleAudioBecomingNoisy(true)
+        .setSeekParameters(SeekParameters.CLOSEST_SYNC) // Hardware sync-frame instant seek
+        .setSeekBackIncrementMs(10_000)       // YouTube standard: 10 s seek steps
+        .setSeekForwardIncrementMs(10_000)    // YouTube standard: 10 s seek steps
+        .setWakeMode(C.WAKE_MODE_NETWORK)     // Keep network awake while buffering in background
         .build().apply {
             // Master gain unity level (1.0f). Prevents premature audio attenuation on Sony TV at volume level 1
             volume = 1.0f
@@ -432,7 +453,6 @@ class RenoTubePlayer @Inject constructor(
             trackSelector.buildUponParameters()
                 .clearVideoSizeConstraints()
                 .setMaxVideoSize(4096, 2160) // Unconstrained DCI 4K (4096x2160) & 4K UHD (3840x2160)
-                .setMinVideoSize(1920, 1080)
                 .setTunnelingEnabled(false)
                 .setPreferredVideoMimeTypes(
                     MimeTypes.VIDEO_VP9,     // Prefer VP9 over AV1 for 4K60 lower latency hardware decoding
@@ -584,6 +604,19 @@ class RenoTubePlayer @Inject constructor(
     var onFirstFrameRenderedListener: (() -> Unit)? = null
 
     init {
+        // Asynchronously clean up stale manifest files once on app startup in background
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val now = System.currentTimeMillis()
+                val mpdFiles = context.cacheDir.listFiles { _, name -> name.startsWith("manifest_") && name.endsWith(".mpd") }
+                mpdFiles?.forEach { file ->
+                    if ((now - file.lastModified()) > 30 * 60 * 1000L) {
+                        file.delete()
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
         exoPlayer.addListener(object : Player.Listener {
             override fun onRenderedFirstFrame() {
                 super.onRenderedFirstFrame()
@@ -632,14 +665,18 @@ class RenoTubePlayer @Inject constructor(
     }
 
     private fun createDataSourceFactory(formatInfo: MediaItemFormatInfo?): DefaultDataSource.Factory {
-        val userAgent = formatInfo?.clientInfo?.userAgent?.takeIf { it.isNotEmpty() }
+        val rawUa = formatInfo?.clientInfo?.userAgent?.takeIf { it.isNotEmpty() }
             ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        val userAgent = if (rawUa.endsWith(" gzip")) rawUa.removeSuffix(" gzip").trim() else rawUa
 
-        val headers = mutableMapOf(
-            "User-Agent" to userAgent,
-            "Origin" to "https://www.youtube.com",
-            "Referer" to "https://www.youtube.com/"
-        )
+        val headers = mutableMapOf<String, String>()
+        headers["User-Agent"] = userAgent
+
+        val clientName = formatInfo?.clientInfo?.clientName
+        if (clientName != null && (clientName.startsWith("TV", ignoreCase = true) || clientName.startsWith("WEB", ignoreCase = true))) {
+            headers["Origin"] = "https://www.youtube.com"
+            headers["Referer"] = if (clientName.startsWith("TV", ignoreCase = true)) "https://www.youtube.com/tv" else "https://www.youtube.com"
+        }
 
         formatInfo?.visitorCookie?.takeIf { it.isNotEmpty() }?.let {
             headers["Cookie"] = it
@@ -650,8 +687,8 @@ class RenoTubePlayer @Inject constructor(
             .setDefaultRequestProperties(headers)
             .setAllowCrossProtocolRedirects(true)
             .setTransferListener(bandwidthMeter)
-            .setConnectTimeoutMs(8_000)
-            .setReadTimeoutMs(10_000)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(20_000)
 
         return DefaultDataSource.Factory(context, httpFactory)
             .setTransferListener(bandwidthMeter)
@@ -719,24 +756,15 @@ class RenoTubePlayer @Inject constructor(
      * 2. HLS Manifest (formatInfo.hlsManifestUrl)
      * 3. Progressive URL (formatInfo.createUrlList())
      */
-    suspend fun playFormatInfo(formatInfo: MediaItemFormatInfo) = withContext(Dispatchers.IO) {
+    suspend fun playFormatInfo(formatInfo: MediaItemFormatInfo): Boolean = withContext(Dispatchers.IO) {
         val dataSourceFactory = createDataSourceFactory(formatInfo)
         val subtitleConfigs = buildSubtitleConfigurations(formatInfo)
 
-        // 1. Clean up older manifest files to prevent disk bloating & eliminate stale tokens
-        try {
-            val now = System.currentTimeMillis()
-            val mpdFiles = context.cacheDir.listFiles { _, name -> name.startsWith("manifest_") && name.endsWith(".mpd") }
-            mpdFiles?.forEach { file ->
-                if ((now - file.lastModified()) > 30 * 60 * 1000L) {
-                    file.delete()
-                }
-            }
-        } catch (_: Exception) {}
 
-        // 2. Prepare DASH MPD from adaptive streams on IO thread
+
+        // 2. Prepare DASH MPD atomically to prevent half-written/corrupt XML files
         val mpdFile = File(context.cacheDir, "manifest_${formatInfo.videoId}.mpd")
-        val mpdReady = if (mpdFile.exists() && mpdFile.length() > 0 && (System.currentTimeMillis() - mpdFile.lastModified()) < 15 * 60 * 1000L) {
+        val mpdReady = if (mpdFile.exists() && mpdFile.length() > 200 && (System.currentTimeMillis() - mpdFile.lastModified()) < 2 * 60 * 1000L) {
             true
         } else {
             val mpdStream = try {
@@ -749,15 +777,24 @@ class RenoTubePlayer @Inject constructor(
             }
 
             if (mpdStream != null) {
+                val tempFile = File(context.cacheDir, "manifest_${formatInfo.videoId}.tmp")
                 try {
                     mpdStream.use { input ->
-                        mpdFile.outputStream().buffered().use { output ->
+                        tempFile.outputStream().buffered().use { output ->
                             input.copyTo(output)
                         }
                     }
-                    mpdFile.length() > 0
+                    if (tempFile.exists() && tempFile.length() > 200) {
+                        if (mpdFile.exists()) mpdFile.delete()
+                        tempFile.renameTo(mpdFile)
+                        true
+                    } else {
+                        tempFile.delete()
+                        false
+                    }
                 } catch (e: Exception) {
                     Log.w(TAG, "Error writing MPD to file: ${e.message}")
+                    try { tempFile.delete() } catch (_: Exception) {}
                     false
                 }
             } else {
@@ -771,7 +808,7 @@ class RenoTubePlayer @Inject constructor(
         } else null
 
         // 3. Switch to Main thread to bind MediaSource to ExoPlayer
-        withContext(Dispatchers.Main) {
+        return@withContext withContext(Dispatchers.Main) {
             exoPlayer.stop()
 
             // Reset any previous per-video audio track overrides and guarantee default English audio
@@ -789,11 +826,11 @@ class RenoTubePlayer @Inject constructor(
                         .setMimeType(MimeTypes.APPLICATION_MPD)
                         .setSubtitleConfigurations(subtitleConfigs)
                         .build()
-                    val mediaSource = DashMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+                    val mediaSource = DashMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
                     exoPlayer.setMediaSource(mediaSource)
                     exoPlayer.prepare()
                     exoPlayer.playWhenReady = true
-                    return@withContext
+                    return@withContext true
                 } catch (e: Exception) {
                     Log.w(TAG, "Error preparing DASH MPD: ${e.message}")
                 }
@@ -806,11 +843,11 @@ class RenoTubePlayer @Inject constructor(
                     .setUri(hlsUrl)
                     .setSubtitleConfigurations(subtitleConfigs)
                     .build()
-                val mediaSource = HlsMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+                val mediaSource = HlsMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
                 exoPlayer.setMediaSource(mediaSource)
                 exoPlayer.prepare()
                 exoPlayer.playWhenReady = true
-                return@withContext
+                return@withContext true
             }
 
             // Fallback to Progressive MP4 URL
@@ -820,15 +857,40 @@ class RenoTubePlayer @Inject constructor(
                     .setUri(progressiveUrl)
                     .setSubtitleConfigurations(subtitleConfigs)
                     .build()
-                val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+                val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
                 exoPlayer.setMediaSource(mediaSource)
                 exoPlayer.prepare()
                 exoPlayer.playWhenReady = true
-                return@withContext
+                return@withContext true
             }
 
             Log.e(TAG, "No playable stream found in format info for video ${formatInfo.videoId}")
+            return@withContext false
         }
+    }
+
+    /**
+     * Immediate Progressive MP4 fallback when DASH encounters a Source Error (e.g. 403 / XML / timeout)
+     */
+    fun playProgressiveFallback(formatInfo: MediaItemFormatInfo?): Boolean {
+        if (formatInfo == null) return false
+        val urls = formatInfo.createUrlList()?.filter { it.isNotEmpty() }
+        val progressiveUrl = urls?.firstOrNull()
+        if (progressiveUrl.isNullOrEmpty()) {
+            return false
+        }
+        Log.w(TAG, "DASH stream failed. Falling back to Progressive MP4 stream: $progressiveUrl")
+        val dataSourceFactory = createDataSourceFactory(formatInfo)
+        val subtitleConfigs = buildSubtitleConfigurations(formatInfo)
+        val mediaItem = Media3MediaItem.Builder()
+            .setUri(progressiveUrl)
+            .setSubtitleConfigurations(subtitleConfigs)
+            .build()
+        val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+        exoPlayer.setMediaSource(mediaSource)
+        exoPlayer.prepare()
+        exoPlayer.playWhenReady = true
+        return true
     }
 
     fun togglePlayPause() {

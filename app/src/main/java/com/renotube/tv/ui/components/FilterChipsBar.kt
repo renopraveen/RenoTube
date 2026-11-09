@@ -69,14 +69,15 @@ fun FilterChipsBar(
     firstChipFocusRequester: FocusRequester? = null
 ) {
     val listState = rememberLazyListState()
+    val view = androidx.compose.ui.platform.LocalView.current
 
     LazyRow(
         state = listState,
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 6.dp),
+        contentPadding = PaddingValues(start = 24.dp, end = 40.dp, top = 8.dp, bottom = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         modifier = modifier
             .fillMaxWidth()
-            .height(52.dp)
+            .height(56.dp)
     ) {
         itemsIndexed(
             items = YOUTUBE_TV_FILTER_CHIPS,
@@ -84,7 +85,14 @@ fun FilterChipsBar(
         ) { index, item ->
             val isSelected = selectedCategory == item.id || (selectedCategory.isBlank() && item.id == "home")
             var isFocused by remember { mutableStateOf(false) }
-            val scale by animateFloatAsState(targetValue = if (isFocused) 1.05f else 1.0f)
+            val scale by animateFloatAsState(
+                targetValue = if (isFocused) 1.05f else 1.0f,
+                animationSpec = androidx.compose.animation.core.tween(
+                    durationMillis = 150,
+                    easing = androidx.compose.animation.core.FastOutSlowInEasing
+                ),
+                label = "chipScale"
+            )
 
             var chipModifier = Modifier
                 .scale(scale)
@@ -99,7 +107,7 @@ fun FilterChipsBar(
                 modifier = chipModifier
                     .onFocusChanged { isFocused = it.isFocused }
                     .border(
-                        width = if (isFocused) 2.dp else 0.dp,
+                        width = if (isFocused) 2.5.dp else 0.dp,
                         color = if (isFocused) YouTubeFocusedBorder else Color.Transparent,
                         shape = RoundedCornerShape(18.dp)
                     )
@@ -115,7 +123,10 @@ fun FilterChipsBar(
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
-                        onClick = { onCategorySelected(item.id) }
+                        onClick = {
+                            view.playSoundEffect(android.view.SoundEffectConstants.CLICK)
+                            onCategorySelected(item.id)
+                        }
                     )
                     .onKeyEvent { keyEvent ->
                         if (keyEvent.type == KeyEventType.KeyDown) {
@@ -133,6 +144,7 @@ fun FilterChipsBar(
                                     }
                                 }
                                 Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                                    view.playSoundEffect(android.view.SoundEffectConstants.CLICK)
                                     onCategorySelected(item.id)
                                     return@onKeyEvent true
                                 }

@@ -49,8 +49,24 @@ class HomeViewModel @Inject constructor(
     var lastFocusedVideoId by mutableStateOf<String?>(null)
         private set
 
+    // Remembers the last-focused row index so we can scroll back to it when returning from player
+    var lastFocusedRowIndex by mutableStateOf(0)
+        private set
+
     fun onCardFocused(video: VideoCardModel) {
         lastFocusedVideoId = video.videoId
+        activePreviewVideo = video
+        prefetchVideo(video.videoId)
+    }
+
+    private val rowFocusedVideoIds = ConcurrentHashMap<Int, String>()
+
+    fun getRowFocusedVideoId(rowIndex: Int): String? = rowFocusedVideoIds[rowIndex]
+
+    fun onCardFocusedWithRow(video: VideoCardModel, rowIndex: Int) {
+        lastFocusedVideoId = video.videoId
+        lastFocusedRowIndex = rowIndex
+        rowFocusedVideoIds[rowIndex] = video.videoId
         activePreviewVideo = video
         prefetchVideo(video.videoId)
     }
@@ -64,34 +80,22 @@ class HomeViewModel @Inject constructor(
     private var prefetchJob: kotlinx.coroutines.Job? = null
 
     /**
-     * Ensures every video tile appears at most ONCE across all rows on screen.
-     * Prevents duplicate video tiles between Home shelves (e.g. Jump Back In, Most Played, and Recommendations).
-     * Also guarantees that no shelf has fewer than 2 videos (single-item shelves are merged into the top shelf).
+     * Ensures:
+     * 1. Every video card appears AT MOST ONCE across all rows on the screen.
+     *    Global deduplication guarantees zero repeated cards between rows.
+     * 2. Every shelf has at least 5 video cards (prevents awkward 3-card stub rows, matching official YouTube TV).
      */
     private fun deduplicateSections(sections: List<SectionRowModel>): List<SectionRowModel> {
-        val seen = HashSet<String>()
         val result = mutableListOf<SectionRowModel>()
-        val orphanItems = mutableListOf<VideoCardModel>()
+        val seenVideoIds = HashSet<String>()
 
         for (section in sections) {
-            val uniqueItems = section.items.filter { video ->
-                if (video.videoId.isNotBlank()) seen.add(video.videoId) else true
+            val uniqueItems = section.items.filter { item ->
+                item.videoId.isNotBlank() && seenVideoIds.add(item.videoId)
             }
-            if (uniqueItems.size >= 2) {
+            if (uniqueItems.size >= 5) {
                 result.add(section.copy(items = uniqueItems))
-            } else if (uniqueItems.isNotEmpty()) {
-                // If a section ended up with only 1 item, don't show an awkward 1-card row!
-                orphanItems.addAll(uniqueItems)
             }
-        }
-
-        // Merge orphan items into the first shelf so no video is lost, but no 1-video row is displayed
-        if (orphanItems.isNotEmpty() && result.isNotEmpty()) {
-            val firstShelf = result[0]
-            val mergedFirstItems = (firstShelf.items + orphanItems).distinctBy { it.videoId }
-            result[0] = firstShelf.copy(items = mergedFirstItems)
-        } else if (result.isEmpty() && orphanItems.size >= 2) {
-            result.add(SectionRowModel(title = "Recommended", items = orphanItems))
         }
 
         return result
@@ -109,21 +113,21 @@ class HomeViewModel @Inject constructor(
     }
 
     fun prefetchVideos(videoIds: List<String>) {
-        viewModelScope.launch(Dispatchers.IO) {
-            videoIds.take(4).forEach { id ->
-                if (id.isNotBlank()) {
-                    launch {
-                        try {
-                            mediaRepository.prefetchFormatInfo(id)
-                        } catch (_: Throwable) {}
-                    }
-                }
-            }
-        }
+        val first = videoIds.firstOrNull { it.isNotBlank() } ?: return
+        prefetchVideo(first)
     }
 
     init {
         loadCategory("home")
+
+        // Auto-update and reflect recommendations based on the signed-in user or account switch
+        viewModelScope.launch {
+            contentRepository.signedInState.collect { isSigned ->
+                android.util.Log.d("HomeViewModel", "User auth state changed: signedIn=$isSigned - auto-refreshing recommendations")
+                categoryCache.clear()
+                loadCategory("home")
+            }
+        }
     }
 
     fun loadHomeFeed() {
@@ -132,7 +136,7 @@ class HomeViewModel @Inject constructor(
 
     fun refreshPersonalizedFeed(force: Boolean = false) {
         if (force) {
-            categoryCache.remove("home")
+            categoryCache.clear()
         }
         loadCategory("home")
     }
@@ -171,12 +175,12 @@ class HomeViewModel @Inject constructor(
             if (category == "home" && !contentRepository.isUserSignedIn) {
                 val personalizedRows = mutableListOf<SectionRowModel>()
                 val recent = userHistoryRepository.getRecentlyWatched(limit = 15)
-                if (recent.isNotEmpty()) {
+                if (recent.size >= 5) {
                     personalizedRows.add(SectionRowModel(title = "Jump Back In", items = recent))
                 }
 
                 val mostPlayed = userHistoryRepository.getMostPlayed(limit = 15)
-                if (mostPlayed.isNotEmpty()) {
+                if (mostPlayed.size >= 5) {
                     personalizedRows.add(SectionRowModel(title = "Most Played Songs & Videos", items = mostPlayed))
                 }
 
@@ -185,8 +189,8 @@ class HomeViewModel @Inject constructor(
                 for (author in topAuthors) {
                     try {
                         val authorResults = contentRepository.search(author)
-                        val authorItems = authorResults.flatMap { it.items }.distinctBy { it.videoId }.take(12)
-                        if (authorItems.isNotEmpty()) {
+                        val authorItems = authorResults.flatMap { it.items }.distinctBy { it.videoId }.take(15)
+                        if (authorItems.size >= 5) {
                             personalizedRows.add(SectionRowModel(title = "More From $author", items = authorItems))
                         }
                     } catch (e: Exception) {

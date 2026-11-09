@@ -23,12 +23,24 @@ class RenoTubeApp : Application(), ImageLoaderFactory {
         } catch (e: Exception) {
             android.util.Log.w("RenoTubeApp", "Initial format reset: ${e.message}")
         }
-        coil.Coil.setImageLoader(this)
+                coil.Coil.setImageLoader(this)
+        try {
+            com.liskovsoft.youtubeapi.app.AppService.instance().warmUpAsync()
+        } catch (e: Throwable) {
+            android.util.Log.w("RenoTubeApp", "Warmup async: ${e.message}")
+        }
     }
 
     override fun newImageLoader(): ImageLoader {
         android.util.Log.d("RenoTubeApp", "newImageLoader() configuring OkHttp3UriFetcher")
         val okHttpClient = OkHttpClient.Builder()
+            .connectTimeout(5_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .readTimeout(8_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .connectionPool(okhttp3.ConnectionPool(16, 5, java.util.concurrent.TimeUnit.MINUTES))
+            .dispatcher(okhttp3.Dispatcher().apply {
+                maxRequests = 48
+                maxRequestsPerHost = 16
+            })
             .addInterceptor { chain ->
                 val request = chain.request().newBuilder()
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")

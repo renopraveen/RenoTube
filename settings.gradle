@@ -15,7 +15,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "RenoTube"
+rootProject.name = "FreeTube"
 
 include ':app'
 include ':mediaserviceinterfaces'

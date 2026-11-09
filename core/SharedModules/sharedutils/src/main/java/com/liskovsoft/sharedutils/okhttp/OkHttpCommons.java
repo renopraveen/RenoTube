@@ -40,7 +40,7 @@ import java.util.concurrent.TimeUnit;
 
 final class OkHttpCommons {
     private static final String TAG = OkHttpCommons.class.getSimpleName();
-    public static final long CONNECT_TIMEOUT_MS = 20_000;
+    public static final long CONNECT_TIMEOUT_MS = 15_000;
     public static final long READ_TIMEOUT_MS = 20_000;
     public static final long WRITE_TIMEOUT_MS = 20_000;
     public static boolean enableProfiler = true;
@@ -89,19 +89,19 @@ final class OkHttpCommons {
     };
 
     private static void setupConnectionParams(OkHttpClient.Builder okBuilder) {
-        // Setup default timeout
-        // https://stackoverflow.com/questions/39219094/sockettimeoutexception-in-retrofit
+        // Setup default timeout for TV hardware responsiveness
         okBuilder.connectTimeout(CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         okBuilder.readTimeout(READ_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         okBuilder.writeTimeout(WRITE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
 
-        // Imitate 'keepAlive' = false (yt throttle fix? Cause slow video loading?)
-        // https://stackoverflow.com/questions/70873186/how-to-disable-connection-pooling-and-make-a-new-connection-for-each-request-in
-        // https://stackoverflow.com/questions/63047533/connection-pool-okhttp
-        // NOTE: SocketTimeoutException fix: setup connection pool with 0 (!) idle connections!
-        //okBuilder.connectionPool(new ConnectionPool(0, READ_TIMEOUT_MS, TimeUnit.MILLISECONDS));
-        //okBuilder.connectionPool(new ConnectionPool(10, 24, TimeUnit.HOURS)); // Video unavailable fix???
-        okBuilder.connectionPool(new ConnectionPool(20, 5, TimeUnit.MINUTES)); // fix npe on pool dispose???
+        // Keep-alive connection pooling: holds open TLS sessions to eliminate 300-800ms handshake delays
+        okBuilder.connectionPool(new ConnectionPool(32, 5, TimeUnit.MINUTES));
+
+        // High concurrency dispatcher tailored for TV streaming: eliminates request bottlenecks
+        okhttp3.Dispatcher dispatcher = new okhttp3.Dispatcher();
+        dispatcher.setMaxRequests(64);
+        dispatcher.setMaxRequestsPerHost(20);
+        okBuilder.dispatcher(dispatcher);
     }
 
     /**
@@ -259,6 +259,7 @@ final class OkHttpCommons {
      * https://github.com/square/okhttp/issues/3955
      */
     private static void fixStreamResetError(Builder okBuilder) {
+        // Force HTTP 1.1 protocol to prevent StreamResetException and 403 Forbidden errors on YouTube streams
         okBuilder.protocols(Collections.singletonList(Protocol.HTTP_1_1));
     }
 

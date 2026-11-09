@@ -76,14 +76,25 @@ fun HomeScreen(
     val coroutineScope = rememberCoroutineScope()
     var selectedVideoForAction by remember { mutableStateOf<VideoCardModel?>(null) }
     var toastMessage by remember { mutableStateOf<String?>(null) }
-    var currentFocusedRowIndex by remember { mutableStateOf(0) }
+    var currentFocusedRowIndex by remember { mutableStateOf(viewModel.lastFocusedRowIndex) }
     val firstChipFocusRequester = remember { FocusRequester() }
 
-    // Instant prefetch for first 3 cards in the top shelf to guarantee sub-500ms TTFB
+    // Restore scroll position to the last-focused row when returning from player
     LaunchedEffect(uiState.sections) {
-        val firstBatch = uiState.sections.firstOrNull()?.items?.take(3) ?: emptyList()
-        firstBatch.forEach { video ->
-            viewModel.prefetchVideo(video.videoId)
+        val savedRow = viewModel.lastFocusedRowIndex
+        if (savedRow > 0 && uiState.sections.isNotEmpty()) {
+            kotlinx.coroutines.delay(100)
+            try {
+                viewModel.homeListState.animateScrollToItem(savedRow.coerceAtMost(uiState.sections.size), 0)
+            } catch (_: Exception) {}
+        }
+    }
+
+    // Instant prefetch for the primary top card to guarantee sub-500ms TTFB without network congestion
+    LaunchedEffect(uiState.sections) {
+        val firstId = uiState.sections.firstOrNull()?.items?.firstOrNull()?.videoId
+        if (!firstId.isNullOrBlank()) {
+            viewModel.prefetchVideo(firstId)
         }
     }
 
@@ -141,16 +152,10 @@ fun HomeScreen(
         } else {
             val homeListState = viewModel.homeListState
 
-            LaunchedEffect(currentFocusedRowIndex) {
-                if (currentFocusedRowIndex == 0) {
-                    homeListState.animateScrollToItem(0, 0)
-                }
-            }
-
             LazyColumn(
                 state = homeListState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 32.dp)
+                contentPadding = PaddingValues(top = 32.dp, bottom = 70.dp)
             ) {
                 // 1. Top Filter Chips Bar (Official YouTube TV category pills)
                 item {
@@ -177,23 +182,44 @@ fun HomeScreen(
                     SectionRow(
                         section = section,
                         onVideoClick = { video ->
-                            viewModel.onCardFocused(video)
+                            viewModel.onCardFocusedWithRow(video, rowIndex + 1)
                             onVideoSelected(video)
                         },
                         onVideoLongClick = { selectedVideoForAction = it },
                         onVideoFocused = { video ->
                             currentFocusedRowIndex = rowIndex + 1
-                            viewModel.onCardFocused(video)
+                            viewModel.onCardFocusedWithRow(video, rowIndex + 1)
+                            coroutineScope.launch {
+                                homeListState.animateScrollToItem(rowIndex + 1)
+                            }
+                        },
+                        onNextVideoPrefetch = { nextVideo ->
+                            viewModel.prefetchVideo(nextVideo.videoId)
                         },
                         onNavigateToSidebar = onNavigateToSidebar,
-                        onUpPress = if (rowIndex == 0) {
-                            {
+                        onUpPress = {
+                            if (rowIndex == 0) {
                                 currentFocusedRowIndex = 0
                                 coroutineScope.launch { homeListState.animateScrollToItem(0, 0) }
-                                false // Allow focus to transition naturally to HeroBanner above
+                                false // Allow focus to transition naturally to FilterChipsBar above
+                            } else {
+                                coroutineScope.launch {
+                                    homeListState.animateScrollToItem(rowIndex)
+                                }
+                                false
                             }
-                        } else null,
-                        focusedVideoId = viewModel.lastFocusedVideoId
+                        },
+                        onDownPress = {
+                            if (rowIndex >= uiState.sections.lastIndex) {
+                                true // Clamp at bottom of feed: stay on this card, never jump to sidebar Settings!
+                            } else {
+                                coroutineScope.launch {
+                                    homeListState.animateScrollToItem(rowIndex + 2)
+                                }
+                                false // Allow focus to transition naturally to next row below
+                            }
+                        },
+                        focusedVideoId = viewModel.getRowFocusedVideoId(rowIndex + 1) ?: viewModel.lastFocusedVideoId
                     )
                 }
             }

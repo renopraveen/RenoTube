@@ -15,7 +15,9 @@ internal object V8ChallengeProvider: JsRuntimeChalBaseJCP() {
     private val tag = V8ChallengeProvider::class.simpleName
     private val v8NpmLibFilename = listOf("${libPrefix}polyfill.js", "${libPrefix}meriyah-6.1.4.min.js", "${libPrefix}astring-1.9.0.min.js")
     private var v8Runtime: V8? = null
-    private val v8Lock = Any()
+    private val v8Executor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "V8ChallengeWorker").apply { isDaemon = true }
+    }
 
     override fun iterScriptSources(): Sequence<Pair<ScriptSource, (ScriptType) -> Script?>> = sequence {
         for ((source, func) in super.iterScriptSources()) {
@@ -34,15 +36,16 @@ internal object V8ChallengeProvider: JsRuntimeChalBaseJCP() {
     }
 
     override fun runJsRuntime(stdin: String): String {
-        synchronized(v8Lock) {
-            initRuntime()
-
-            val result = runV8(stdin)
-
-            shutdownIfNeeded()
-
-            return result
-        }
+        return v8Executor.submit(java.util.concurrent.Callable {
+            try {
+                initRuntime()
+                runV8(stdin)
+            } catch (e: Exception) {
+                // If a fatal engine or script error occurred, reset runtime to recover on next invocation
+                disposeRuntime()
+                throw e
+            }
+        }).get(15, java.util.concurrent.TimeUnit.SECONDS)
     }
 
     private fun runV8(stdin: String): String {
@@ -62,22 +65,26 @@ internal object V8ChallengeProvider: JsRuntimeChalBaseJCP() {
         if (v8Runtime != null)
             return
         v8Runtime = V8.createV8Runtime()
-        runV8(constructCommonStdin()) // ignore the result, just warm up
+        runV8(constructCommonStdin()) // warm up AST and polyfill libraries once
     }
 
     private fun disposeRuntime() {
         val runtime = v8Runtime ?: return
-
-        // NOTE: getting lock fixes "Invalid V8 thread access: the locker has been released!"
-        runtime.withLock {
-            it.release(false)
-        }
+        try {
+            runtime.withLock {
+                it.release(false)
+            }
+        } catch (_: Throwable) {}
         v8Runtime = null
     }
 
-    private fun shutdownIfNeeded() {
-        // NOTE: Possible Invalid thread access if using RxHelper runAsync
-        // NOTE: Shutdown should run on the same thread that created V8 engine.
-        disposeRuntime()
+    fun warmUpAsync() {
+        v8Executor.submit {
+            try {
+                initRuntime()
+            } catch (e: Throwable) {
+                disposeRuntime()
+            }
+        }
     }
 }

@@ -66,6 +66,7 @@ internal object RetrofitOkHttpHelper {
     private fun createClient(): OkHttpClient {
         val builder = OkHttpManager.instance().client.newBuilder()
         addCommonHeaders(builder)
+        // Note: cronet-okhttp 0.1.0 has binary incompatibility with OkHttp 3.12 and causes recursion with AppService
         //addCronetInterceptor(builder)
         return builder.build()
     }
@@ -140,9 +141,15 @@ internal object RetrofitOkHttpHelper {
     }
 
     private fun addCronetInterceptor(builder: OkHttpClient.Builder) {
-        val engine = CronetManager.getEngine(AppService.instance().context)
-        if (engine != null) {
-            builder.addInterceptor(CronetInterceptor.newBuilder(engine).build())
+        try {
+            val context = AppService.instance().context ?: return
+            val engine = CronetManager.getEngine(context)
+            if (engine != null) {
+                builder.addInterceptor(CronetInterceptor.newBuilder(engine).build())
+                com.liskovsoft.sharedutils.mylogger.Log.i("RetrofitOkHttpHelper", "Chromium Cronet HTTP/3 & QUIC interceptor active")
+            }
+        } catch (e: Throwable) {
+            com.liskovsoft.sharedutils.mylogger.Log.w("RetrofitOkHttpHelper", "Cronet unavailable, using standard OkHttp: ${e.message}")
         }
     }
 }

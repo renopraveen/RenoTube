@@ -28,7 +28,15 @@ public class AppService {
         mAppServiceCore = new AppServiceCoreCached();
     }
 
-    public static AppService instance() {
+    public void warmUpAsync() {
+        try {
+            com.liskovsoft.youtubeapi.app.nsigsolver.impl.V8ChallengeProvider.INSTANCE.warmUpAsync();
+        } catch (Throwable t) {
+            // best-effort
+        }
+    }
+
+    public static synchronized AppService instance() {
         if (sInstance == null) {
             sInstance = new AppService();
         }
@@ -144,13 +152,9 @@ public class AppService {
             return mClientPlaybackNonce;
         }
 
-        PlayerDataExtractor playerDataExtractor = mAppServiceCore.getPlayerDataExtractor(client);
-
-        if (playerDataExtractor == null) {
-            return null;
-        }
-
-        mClientPlaybackNonce = playerDataExtractor.createClientPlaybackNonce();
+        // Fast path: clientPlaybackNonce (CPN) is a random 16-character alphanumeric nonce.
+        // Generating it directly avoids calling WebPlayerDataExtractor and firing the heavy V8 AST JS compiler on every query!
+        mClientPlaybackNonce = com.liskovsoft.googlecommon.common.helpers.YouTubeHelper.generateCPNParameter2();
 
         return mClientPlaybackNonce;
     }

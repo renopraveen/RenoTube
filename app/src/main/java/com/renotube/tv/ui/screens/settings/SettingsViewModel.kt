@@ -51,8 +51,31 @@ class SettingsViewModel @Inject constructor(
     private val ambilightRepository: AmbilightRepository,
     private val renoTubePlayer: RenoTubePlayer,
     private val userHistoryRepository: UserHistoryRepository,
-    private val signInService: SignInService
+    private val signInService: SignInService,
+    private val otaUpdateManager: com.renotube.tv.update.OtaUpdateManager
 ) : ViewModel() {
+
+    val updateState = otaUpdateManager.updateState
+
+    fun checkForUpdates(manual: Boolean = true, forceShowEvenIfSame: Boolean = false) {
+        otaUpdateManager.checkForUpdates(manual = manual, forceShowEvenIfSame = forceShowEvenIfSame)
+    }
+
+    fun startUpdateDownload(info: com.renotube.tv.update.UpdateInfo) {
+        otaUpdateManager.startDownload(info)
+    }
+
+    fun cancelUpdateDownload() {
+        otaUpdateManager.cancelDownload()
+    }
+
+    fun installUpdateApk(file: java.io.File) {
+        otaUpdateManager.installApk(file)
+    }
+
+    fun dismissUpdate() {
+        otaUpdateManager.dismiss()
+    }
 
     val tvIpAddress: String = WebRemoteServer.getLocalIpAddress(context)
     val webRemoteUrl: String = "http://$tvIpAddress:$DEFAULT_WEB_REMOTE_PORT"

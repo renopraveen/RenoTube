@@ -36,6 +36,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.zIndex
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -76,18 +79,12 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import java.io.File
 
-@dagger.hilt.EntryPoint
-@dagger.hilt.InstallIn(dagger.hilt.components.SingletonComponent::class)
-interface VideoCardEntryPoint {
-    fun mediaRepository(): com.renotube.tv.data.repository.MediaRepository
-}
-
 @Composable
 fun VideoCard(
     video: VideoCardModel,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    cardWidth: Dp = 260.dp,
+    cardWidth: Dp = 296.dp,
     onLongClick: (() -> Unit)? = null,
     onFocused: (() -> Unit)? = null,
     isLastFocused: Boolean = false,
@@ -100,7 +97,14 @@ fun VideoCard(
     focusRequester: FocusRequester? = null
 ) {
     var isFocused by remember { mutableStateOf(false) }
-    val animatedScale by animateFloatAsState(targetValue = if (isFocused) 1.05f else 1.0f)
+    val animatedScale by animateFloatAsState(
+        targetValue = if (isFocused) 1.06f else 1.0f,
+        animationSpec = androidx.compose.animation.core.tween(
+            durationMillis = 150,
+            easing = androidx.compose.animation.core.FastOutSlowInEasing
+        ),
+        label = "cardScale"
+    )
     val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
     var longPressJob by remember { mutableStateOf<Job?>(null) }
     var isLongPressTriggered by remember { mutableStateOf(false) }
@@ -109,81 +113,21 @@ fun VideoCard(
     val effectiveFocusRequester = focusRequester ?: cardFocusRequester
 
     val context = LocalContext.current
-    val entryPoint = remember(context) {
-        try {
-            dagger.hilt.android.EntryPointAccessors.fromApplication(
-                context.applicationContext,
-                VideoCardEntryPoint::class.java
-            )
-        } catch (_: Exception) { null }
-    }
-    val mediaRepository = entryPoint?.mediaRepository()
-
-    var isPreviewPlaying by remember { mutableStateOf(false) }
-    var previewPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
-
-    LaunchedEffect(isFocused, video.videoId) {
-        if (!isFocused || video.videoId.isBlank() || mediaRepository == null) {
-            isPreviewPlaying = false
-            previewPlayer?.stop()
-            previewPlayer?.release()
-            previewPlayer = null
-            return@LaunchedEffect
-        }
-
-        // 5-second hover threshold: only start live preview if cursor rests on card for > 5s
-        delay(5000)
-
-        try {
-            val formatInfo = mediaRepository.getFormatInfo(video.videoId)
-            val progressiveUrls = formatInfo?.createUrlList()
-            val progressiveUrl = progressiveUrls?.firstOrNull { it.isNotEmpty() }
-            val hlsUrl = if (formatInfo?.containsHlsUrl() == true) formatInfo.hlsManifestUrl else null
-            val mpdFile = File(context.cacheDir, "manifest_${video.videoId}.mpd")
-
-            val player = ExoPlayer.Builder(context).build().apply {
-                volume = 0f // Muted live preview inside card modal
-                repeatMode = Player.REPEAT_MODE_ALL
-                playWhenReady = true
-            }
-
-            if (mpdFile.exists() && mpdFile.length() > 0) {
-                val mediaItem = MediaItem.Builder()
-                    .setUri(Uri.fromFile(mpdFile))
-                    .setMimeType(MimeTypes.APPLICATION_MPD)
-                    .build()
-                player.setMediaItem(mediaItem)
-            } else if (!progressiveUrl.isNullOrEmpty()) {
-                player.setMediaItem(MediaItem.fromUri(progressiveUrl))
-            } else if (!hlsUrl.isNullOrEmpty()) {
-                player.setMediaItem(MediaItem.fromUri(hlsUrl))
-            } else {
-                player.release()
-                return@LaunchedEffect
-            }
-
-            player.prepare()
-            previewPlayer = player
-            isPreviewPlaying = true
-        } catch (_: Exception) {
-            isPreviewPlaying = false
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            try {
-                previewPlayer?.stop()
-                previewPlayer?.release()
-            } catch (_: Exception) {}
-            previewPlayer = null
-            isPreviewPlaying = false
-        }
-    }
-
+    val view = androidx.compose.ui.platform.LocalView.current
     LaunchedEffect(isFocused) {
         if (isFocused) {
             onFocused?.invoke()
+        }
+    }
+
+    // Restore focus to this card when returning from the player (isLastFocused = true means this was the last card clicked)
+    LaunchedEffect(isLastFocused) {
+        if (isLastFocused) {
+            // Small delay to let the LazyRow/LazyColumn fully settle before requesting focus
+            kotlinx.coroutines.delay(150)
+            try {
+                effectiveFocusRequester.requestFocus()
+            } catch (_: Exception) {}
         }
     }
 
@@ -191,6 +135,7 @@ fun VideoCard(
         modifier = modifier
             .width(cardWidth)
             .scale(animatedScale)
+            .zIndex(if (isFocused) 10f else 1f)
             .padding(6.dp)
             .focusRequester(effectiveFocusRequester)
             .onFocusChanged { 
@@ -287,10 +232,12 @@ fun VideoCard(
 
                         if ((wasLongPress || wasTriggered) && onLongClick != null) {
                             // User pressed, held, AND RELEASED the button: open context menu now!
+                            view.playSoundEffect(android.view.SoundEffectConstants.CLICK)
                             onLongClick.invoke()
                             return@onKeyEvent true
                         } else {
                             // Authentic short click: open video
+                            view.playSoundEffect(android.view.SoundEffectConstants.CLICK)
                             onClick()
                             return@onKeyEvent true
                         }
@@ -301,8 +248,14 @@ fun VideoCard(
             }
             .pointerInput(Unit) {
                 detectTapGestures(
-                    onTap = { onClick() },
-                    onLongPress = { onLongClick?.invoke() }
+                    onTap = {
+                        view.playSoundEffect(android.view.SoundEffectConstants.CLICK)
+                        onClick()
+                    },
+                    onLongPress = {
+                        view.playSoundEffect(android.view.SoundEffectConstants.CLICK)
+                        onLongClick?.invoke()
+                    }
                 )
             }
     ) {
@@ -319,43 +272,26 @@ fun VideoCard(
                 )
                 .background(YouTubeSurface)
         ) {
-            if (isPreviewPlaying && previewPlayer != null) {
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            player = previewPlayer
-                            useController = false
-                            isFocusable = false
-                            isFocusableInTouchMode = false
-                            descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
-                            setShutterBackgroundColor(android.graphics.Color.BLACK)
-                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                        }
-                    },
-                    update = { view ->
-                        view.player = previewPlayer
-                        view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                val fallbackUrl = if (video.videoId.isNotBlank()) "https://i.ytimg.com/vi/${video.videoId}/hqdefault.jpg" else null
-                val imageTargetUrl = video.thumbnailUrl.ifBlank { fallbackUrl }
-                val imageRequest = remember(imageTargetUrl) {
-                    coil.request.ImageRequest.Builder(context)
-                        .data(imageTargetUrl)
-                        .size(520, 293)
-                        .precision(coil.size.Precision.EXACT)
-                        .crossfade(100)
-                        .build()
-                }
-                coil.compose.AsyncImage(
-                    model = imageRequest,
-                    contentDescription = video.title,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
+            // Base layer: Thumbnail is ALWAYS loaded and displayed with resilient fallback
+            val videoId = video.videoId
+            val mqFallback = if (videoId.isNotBlank()) "https://i.ytimg.com/vi/$videoId/mqdefault.jpg" else null
+            val hqFallback = if (videoId.isNotBlank()) "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" else null
+            val imageTargetUrl = video.thumbnailUrl.ifBlank { hqFallback ?: mqFallback }
+
+            val imageRequest = remember(imageTargetUrl, videoId) {
+                coil.request.ImageRequest.Builder(context)
+                    .data(imageTargetUrl)
+                    .size(520, 293)
+                    .precision(coil.size.Precision.EXACT)
+                    .crossfade(100)
+                    .build()
             }
+            coil.compose.AsyncImage(
+                model = imageRequest,
+                contentDescription = video.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
 
             // Live Badge
             if (video.isLive) {
@@ -382,12 +318,12 @@ fun VideoCard(
                         .align(Alignment.BottomEnd)
                         .padding(6.dp)
                         .background(YouTubeBadgeBackground, RoundedCornerShape(4.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .padding(horizontal = 6.dp, vertical = 2.5.dp)
                 ) {
                     Text(
                         text = video.durationText,
                         color = Color.White,
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
@@ -412,22 +348,22 @@ fun VideoCard(
         // Official YouTube TV Metadata Layout: Channel Avatar Circle + Title & Channel Details
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.Top
         ) {
             // Channel Avatar Circle (Author initial / avatar)
             val authorInitial = video.author.trim().firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "Y"
             Box(
                 modifier = Modifier
-                    .size(34.dp)
+                    .size(38.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF2C2C2C)),
+                    .background(if (isFocused) YouTubeRed else Color(0xFF2C2C2C)),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = authorInitial,
                     color = YouTubeWhite,
-                    fontSize = 14.sp,
+                    fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center
                 )
@@ -443,13 +379,13 @@ fun VideoCard(
                     minLines = 2,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    color = if (isFocused) YouTubeWhite else YouTubeWhite.copy(alpha = 0.92f),
-                    fontSize = 13.sp,
+                    color = if (isFocused) YouTubeWhite else YouTubeWhite.copy(alpha = 0.90f),
+                    fontSize = 14.5.sp,
                     fontWeight = if (isFocused) FontWeight.Bold else FontWeight.SemiBold,
-                    lineHeight = 17.5.sp
+                    lineHeight = 19.sp
                 )
 
-                Spacer(modifier = Modifier.height(3.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
                 val metadataLine = remember(video.author, video.secondTitle) {
                     val (cleanAuth, cleanSec) = VideoCardModel.cleanAuthorAndDetails(video.author, video.secondTitle)
@@ -466,8 +402,8 @@ fun VideoCard(
                         text = metadataLine,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        color = YouTubeSecondaryText,
-                        fontSize = 11.5.sp,
+                        color = if (isFocused) YouTubeWhite.copy(alpha = 0.85f) else YouTubeSecondaryText,
+                        fontSize = 12.5.sp,
                         fontWeight = FontWeight.Normal
                     )
                 }

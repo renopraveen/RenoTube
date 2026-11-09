@@ -7,6 +7,7 @@ import com.renotube.tv.data.model.SponsorSegmentModel
 import com.renotube.tv.data.model.VideoPlaybackMetadata
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -20,7 +21,7 @@ class MediaRepository @Inject constructor(
     private val mediaItemService: MediaItemService
 ) {
     private val formatCache = ConcurrentHashMap<String, Pair<Long, MediaItemFormatInfo>>()
-    private val CACHE_TTL_MS = 15 * 60 * 1000L // 15 minutes fresh cache
+    private val CACHE_TTL_MS = 2 * 60 * 1000L // 2 minutes fresh cache to prevent stale nonces
 
     var ambilightLowResUrl: String? = null
         private set
@@ -74,10 +75,30 @@ class MediaRepository @Inject constructor(
         }
     }
 
+    fun invalidateFormat(videoId: String) {
+        formatCache.remove(videoId)
+        try {
+            File(context.cacheDir, "manifest_${videoId}.mpd").delete()
+            File(context.cacheDir, "manifest_${videoId}.tmp").delete()
+        } catch (_: Exception) {}
+    }
+
     private val inFlightPrefetches = ConcurrentHashMap.newKeySet<String>()
+
+    @Volatile
+    var isPlaybackActive: Boolean = false
+
+    @Volatile
+    var isResolvingPrimaryStream: Boolean = false
+
+    private var activePrefetchJob: kotlinx.coroutines.Job? = null
+    private val prefetchScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
+    )
 
     suspend fun getFormatInfo(videoId: String, clickTrackingParams: String? = null): MediaItemFormatInfo? =
         withContext(Dispatchers.IO) {
+            isPlaybackActive = true
             val cached = formatCache[videoId]
             val now = System.currentTimeMillis()
             if (cached != null && (now - cached.first) < CACHE_TTL_MS && !cached.second.isUnplayable) {
@@ -85,76 +106,137 @@ class MediaRepository @Inject constructor(
                 return@withContext cached.second
             }
             
-            val start = System.currentTimeMillis()
-            var info: MediaItemFormatInfo? = null
+            isResolvingPrimaryStream = true
             try {
-                info = withTimeoutOrNull(8000) {
-                    mediaItemService.getFormatInfo(videoId, clickTrackingParams)
-                }
-                
-                // If primary format timed out or returned unplayable, perform soft failover (pot cache reset)
-                if (info == null || info.isUnplayable) {
-                    android.util.Log.w("MediaRepository", "Primary format unplayable for $videoId. Trying soft failover...")
-                    com.liskovsoft.youtubeapi.service.YouTubeServiceManager.instance().switchNextClient()
-                    info = withTimeoutOrNull(6000) {
+                val start = System.currentTimeMillis()
+                var info: MediaItemFormatInfo? = null
+                try {
+                    info = withTimeoutOrNull(12000) {
                         mediaItemService.getFormatInfo(videoId, clickTrackingParams)
                     }
-                    // If soft failover still unplayable, restore default TV client so next video is never stuck
+                    
+                    // If primary format timed out or returned unplayable, perform soft failover
                     if (info == null || info.isUnplayable) {
-                        resetClientToDefault()
+                        android.util.Log.w("MediaRepository", "Primary format unplayable for $videoId. Trying soft failover...")
+                        com.liskovsoft.youtubeapi.service.YouTubeServiceManager.instance().switchNextClient()
+                        info = withTimeoutOrNull(8000) {
+                            mediaItemService.getFormatInfo(videoId, clickTrackingParams)
+                        }
+                        if (info == null || info.isUnplayable) {
+                            resetClientToDefault()
+                        }
                     }
+                } catch (t: Throwable) {
+                    android.util.Log.e("MediaRepository", "Format info resolution failed for $videoId: ${t.message}")
                 }
-            } catch (t: Throwable) {
-                android.util.Log.e("MediaRepository", "Format info resolution failed for $videoId: ${t.message}")
-            }
 
-            val success = (info != null && !info.isUnplayable)
-            com.renotube.tv.perf.PerformanceTracker.recordApiLatency("Resolve Stream", start, isSuccess = success)
+                val success = (info != null && !info.isUnplayable)
+                com.renotube.tv.perf.PerformanceTracker.recordApiLatency("Resolve Stream", start, isSuccess = success)
 
-            if (success) {
-                formatCache[videoId] = Pair(now, info!!)
-                ambilightLowResUrl = extractLowResVideoStreamUrl(info)
+                if (success) {
+                    formatCache[videoId] = Pair(now, info!!)
+                    ambilightLowResUrl = extractLowResVideoStreamUrl(info)
+                    try {
+                        getOrGenerateMpdFile(info)
+                    } catch (_: Exception) {}
+                }
+                info
+            } finally {
+                isResolvingPrimaryStream = false
             }
-            info
         }
 
-    suspend fun prefetchFormatInfo(videoId: String) = withContext(Dispatchers.IO) {
-        if (videoId.isBlank()) return@withContext
-        val cached = formatCache[videoId]
-        val now = System.currentTimeMillis()
-        if (cached != null && (now - cached.first) < CACHE_TTL_MS && !cached.second.isUnplayable) {
-            return@withContext
-        }
+    private val mpdLock = Any()
 
-        if (inFlightPrefetches.add(videoId)) {
-            try {
-                if (!formatCache.containsKey(videoId)) {
-                    val info = mediaItemService.getFormatInfo(videoId, null)
-                    if (info != null && !info.isUnplayable) {
-                        formatCache[videoId] = Pair(System.currentTimeMillis(), info)
-                        // Pre-generate DASH MPD file in cache directory so player starts in 0ms!
-                        try {
-                            val mpdFile = File(context.cacheDir, "manifest_${videoId}.mpd")
-                            if (!mpdFile.exists() || mpdFile.length() == 0L) {
-                                if (info.containsDashFormats() || info.containsSabrFormats()) {
-                                    info.createMpdStream()?.use { input ->
-                                        mpdFile.outputStream().buffered().use { output ->
-                                            input.copyTo(output)
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (e: Exception) {
-                            android.util.Log.w("MediaRepository", "MPD prewarm non-fatal warning: ${e.message}")
+    fun getOrGenerateMpdFile(formatInfo: MediaItemFormatInfo): File? {
+        val file = File(context.cacheDir, "manifest_${formatInfo.videoId}.mpd")
+        if (file.exists() && file.length() > 200 && (System.currentTimeMillis() - file.lastModified()) < (2 * 60 * 1000L)) {
+            return file
+        }
+        synchronized(mpdLock) {
+            if (file.exists() && file.length() > 200 && (System.currentTimeMillis() - file.lastModified()) < (2 * 60 * 1000L)) {
+                return file
+            }
+            val tempFile = File(context.cacheDir, "manifest_${formatInfo.videoId}.tmp")
+            return try {
+                if (formatInfo.containsDashFormats() || formatInfo.containsSabrFormats()) {
+                    formatInfo.createMpdStream()?.use { input ->
+                        tempFile.outputStream().buffered().use { output ->
+                            input.copyTo(output)
                         }
                     }
                 }
-            } catch (t: Throwable) {
-                android.util.Log.w("MediaRepository", "prefetchFormatInfo error for $videoId: ${t.message}")
-            } finally {
-                inFlightPrefetches.remove(videoId)
+                if (tempFile.exists() && tempFile.length() > 200) {
+                    if (file.exists()) file.delete()
+                    tempFile.renameTo(file)
+                    file
+                } else {
+                    tempFile.delete()
+                    if (file.exists() && file.length() > 200) file else null
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("MediaRepository", "Failed creating MPD for ${formatInfo.videoId}: ${e.message}")
+                try { tempFile.delete() } catch (_: Exception) {}
+                null
             }
         }
+    }
+
+    fun createDataSourceFactory(formatInfo: MediaItemFormatInfo?): androidx.media3.datasource.DataSource.Factory {
+        val userAgent = formatInfo?.clientInfo?.userAgent?.takeIf { it.isNotEmpty() }
+            ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+        val headers = mutableMapOf<String, String>()
+        headers["User-Agent"] = userAgent
+
+        val clientName = formatInfo?.clientInfo?.clientName
+        if (clientName != null && (clientName.startsWith("TV", ignoreCase = true) || clientName.startsWith("WEB", ignoreCase = true))) {
+            headers["Origin"] = "https://www.youtube.com"
+            headers["Referer"] = if (clientName.startsWith("TV", ignoreCase = true)) "https://www.youtube.com/tv" else "https://www.youtube.com"
+        }
+
+        formatInfo?.visitorCookie?.takeIf { it.isNotEmpty() }?.let {
+            headers["Cookie"] = it
+        }
+
+        val httpFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+            .setUserAgent(userAgent)
+            .setDefaultRequestProperties(headers)
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(8_000)
+            .setReadTimeoutMs(10_000)
+
+        return androidx.media3.datasource.DefaultDataSource.Factory(context, httpFactory)
+    }
+
+    fun createMediaSource(formatInfo: MediaItemFormatInfo): androidx.media3.exoplayer.source.MediaSource? {
+        val dataSourceFactory = createDataSourceFactory(formatInfo)
+        val mpdFile = getOrGenerateMpdFile(formatInfo)
+        if (mpdFile != null) {
+            val mediaItem = androidx.media3.common.MediaItem.Builder()
+                .setUri(android.net.Uri.fromFile(mpdFile))
+                .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_MPD)
+                .build()
+            return androidx.media3.exoplayer.dash.DashMediaSource.Factory(dataSourceFactory)
+                .createMediaSource(mediaItem)
+        }
+        if (formatInfo.containsHlsUrl() && !formatInfo.hlsManifestUrl.isNullOrEmpty()) {
+            val mediaItem = androidx.media3.common.MediaItem.fromUri(formatInfo.hlsManifestUrl)
+            return androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dataSourceFactory)
+                .createMediaSource(mediaItem)
+        }
+        val progressive = formatInfo.createUrlList()?.firstOrNull { it.isNotEmpty() }
+        if (!progressive.isNullOrEmpty()) {
+            val mediaItem = androidx.media3.common.MediaItem.fromUri(progressive)
+            return androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(dataSourceFactory)
+                .createMediaSource(mediaItem)
+        }
+        return null
+    }
+
+    suspend fun prefetchFormatInfo(videoId: String) = withContext(Dispatchers.IO) {
+        // Safe no-op on TV hardware to eliminate YouTube rate-limiting, nonce clashes and decoder contention
+        return@withContext
     }
 
     suspend fun getMetadata(videoId: String): VideoPlaybackMetadata? = withContext(Dispatchers.IO) {

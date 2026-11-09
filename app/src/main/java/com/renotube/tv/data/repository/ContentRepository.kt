@@ -7,6 +7,9 @@ import com.renotube.tv.data.model.VideoCardModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
@@ -23,76 +26,106 @@ class ContentRepository @Inject constructor(
 
     val isUserSignedIn: Boolean get() = signInService.isSigned
 
+    private val _signedInState = MutableStateFlow(signInService.isSigned)
+    val signedInState: StateFlow<Boolean> = _signedInState.asStateFlow()
+
+    init {
+        try {
+            signInService.addOnAccountChange { account ->
+                val signed = signInService.isSigned
+                android.util.Log.i(TAG, "Account changed: ${account?.name}, signedIn=$signed - notifying subscribers")
+                _signedInState.value = signed
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "Failed to register account change listener: ${e.message}")
+        }
+    }
+
     /**
      * Emits home rows progressively as they arrive from YouTube.
-     * Subscribes to getTrendingObserve() and getHomeObserve() concurrently to ensure
-     * immediate video cards render even for guest sessions without delay.
+     * Uses YouTube's official recommendation and multi-shelf algorithm.
+     * When signed in, automatically reflects the user's personal recommendations, history, and subscribed channels.
      */
     fun getHomeRowsFlow(): Flow<List<SectionRowModel>> = callbackFlow {
         val disposables = io.reactivex.disposables.CompositeDisposable()
 
         if (signInService.isSigned) {
-            android.util.Log.i(TAG, "Signed into Google Account: using YouTube cloud history and recommendation algorithm")
+            android.util.Log.i(TAG, "Signed in: loading YouTube personal recommendations and multi-shelves")
 
-            // 1. YouTube authenticated Watch History
+            // 1. YouTube authenticated Watch History (Jump Back In)
             val historyDisposable = contentService.getHistoryObserve()
                 .subscribe(
                     { group ->
                         if (group != null) {
                             val row = SectionRowModel.fromMediaGroup(group).copy(title = "Watch History")
-                            if (row.items.isNotEmpty()) {
-                                android.util.Log.d(TAG, "Cloud history emitted ${row.items.size} cards")
+                            if (row.items.size >= 3) {
                                 trySend(listOf(row))
                             }
                         }
                     },
-                    { error -> android.util.Log.w(TAG, "Cloud history warning: ${error.message}") }
+                    { error -> android.util.Log.w(TAG, "Personalized history warning: ${error.message}") }
                 )
             disposables.add(historyDisposable)
 
-            // 2. YouTube authenticated Recommended for You
-            val recDisposable = contentService.getRecommendedObserve()
-                .subscribe(
-                    { group ->
-                        if (group != null) {
-                            val row = SectionRowModel.fromMediaGroup(group).copy(title = "Recommended for You")
-                            if (row.items.isNotEmpty()) {
-                                android.util.Log.d(TAG, "Cloud recommended emitted ${row.items.size} cards")
-                                trySend(listOf(row))
-                            }
-                        }
-                    },
-                    { error -> android.util.Log.w(TAG, "Cloud recommended warning: ${error.message}") }
-                )
-            disposables.add(recDisposable)
-
-            // 3. YouTube authenticated personalized Home browse rows
+            // 2. YouTube official Home Multi-Shelf Browse Rows (personal categories, channels, and recommendations)
             val homeDisposable = contentService.getHomeObserve()
                 .subscribe(
                     { groups ->
                         val rows = groups
                             ?.map { SectionRowModel.fromMediaGroup(it) }
-                            ?.filter { it.items.isNotEmpty() }
+                            ?.filter { it.items.size >= 4 }
                             ?: emptyList()
                         if (rows.isNotEmpty()) {
-                            android.util.Log.d(TAG, "Cloud home emitted ${rows.size} rows with cards")
+                            android.util.Log.d(TAG, "Personalized home multi-shelves emitted ${rows.size} rows")
                             trySend(rows)
                         }
                     },
-                    { error -> android.util.Log.w(TAG, "Cloud home feed warning: ${error.message}") }
+                    { error -> android.util.Log.w(TAG, "Personalized home multi-shelves warning: ${error.message}") }
                 )
             disposables.add(homeDisposable)
+
+            // 3. Subscriptions row
+            val subsDisposable = contentService.getSubscriptionsObserve()
+                .subscribe(
+                    { group ->
+                        if (group != null) {
+                            val row = SectionRowModel.fromMediaGroup(group).copy(title = "From Your Subscriptions")
+                            if (row.items.size >= 4) {
+                                trySend(listOf(row))
+                            }
+                        }
+                    },
+                    { error -> android.util.Log.w(TAG, "Subscriptions feed warning: ${error.message}") }
+                )
+            disposables.add(subsDisposable)
         } else {
-            // Guest session: instant trending, gaming, music, home
+            android.util.Log.i(TAG, "Guest session: loading default YouTube recommendations and multi-shelves")
+
+            // 1. Official YouTube default Home multi-shelves
+            val homeDisposable = contentService.getHomeObserve()
+                .subscribe(
+                    { groups ->
+                        val rows = groups
+                            ?.map { SectionRowModel.fromMediaGroup(it) }
+                            ?.filter { it.items.size >= 4 }
+                            ?: emptyList()
+                        if (rows.isNotEmpty()) {
+                            trySend(rows)
+                        }
+                    },
+                    { error -> android.util.Log.w(TAG, "Default home warning: ${error.message}") }
+                )
+            disposables.add(homeDisposable)
+
+            // 2. Official YouTube Trending Shelves
             val trendingDisposable = contentService.getTrendingObserve()
                 .subscribe(
                     { groups ->
                         val rows = groups
                             ?.map { SectionRowModel.fromMediaGroup(it) }
-                            ?.filter { it.items.isNotEmpty() }
+                            ?.filter { it.items.size >= 4 }
                             ?: emptyList()
                         if (rows.isNotEmpty()) {
-                            android.util.Log.d(TAG, "Trending emitted ${rows.size} rows with cards")
                             trySend(rows)
                         }
                     },
@@ -100,31 +133,15 @@ class ContentRepository @Inject constructor(
                 )
             disposables.add(trendingDisposable)
 
-            val gamingDisposable = contentService.getGamingObserve()
-                .subscribe(
-                    { groups ->
-                        val rows = groups
-                            ?.map { SectionRowModel.fromMediaGroup(it) }
-                            ?.filter { it.items.isNotEmpty() }
-                            ?: emptyList()
-                        if (rows.isNotEmpty()) {
-                            android.util.Log.d(TAG, "Gaming emitted ${rows.size} rows with cards")
-                            trySend(rows)
-                        }
-                    },
-                    { error -> android.util.Log.w(TAG, "Gaming feed warning: ${error.message}") }
-                )
-            disposables.add(gamingDisposable)
-
+            // 3. Official YouTube Music Shelves
             val musicDisposable = contentService.getMusicObserve()
                 .subscribe(
                     { groups ->
                         val rows = groups
                             ?.map { SectionRowModel.fromMediaGroup(it) }
-                            ?.filter { it.items.isNotEmpty() }
+                            ?.filter { it.items.size >= 4 }
                             ?: emptyList()
                         if (rows.isNotEmpty()) {
-                            android.util.Log.d(TAG, "Music emitted ${rows.size} rows with cards")
                             trySend(rows)
                         }
                     },
@@ -132,21 +149,37 @@ class ContentRepository @Inject constructor(
                 )
             disposables.add(musicDisposable)
 
-            val homeDisposable = contentService.getHomeObserve()
+            // 4. Official YouTube Gaming Shelves
+            val gamingDisposable = contentService.getGamingObserve()
                 .subscribe(
                     { groups ->
                         val rows = groups
                             ?.map { SectionRowModel.fromMediaGroup(it) }
-                            ?.filter { it.items.isNotEmpty() }
+                            ?.filter { it.items.size >= 4 }
                             ?: emptyList()
                         if (rows.isNotEmpty()) {
-                            android.util.Log.d(TAG, "Home emitted ${rows.size} rows with cards")
                             trySend(rows)
                         }
                     },
-                    { error -> android.util.Log.w(TAG, "Home feed warning: ${error.message}") }
+                    { error -> android.util.Log.w(TAG, "Gaming feed warning: ${error.message}") }
                 )
-            disposables.add(homeDisposable)
+            disposables.add(gamingDisposable)
+
+            // 5. Official YouTube News Shelves
+            val newsDisposable = contentService.getNewsObserve()
+                .subscribe(
+                    { groups ->
+                        val rows = groups
+                            ?.map { SectionRowModel.fromMediaGroup(it) }
+                            ?.filter { it.items.size >= 4 }
+                            ?: emptyList()
+                        if (rows.isNotEmpty()) {
+                            trySend(rows)
+                        }
+                    },
+                    { error -> android.util.Log.w(TAG, "News feed warning: ${error.message}") }
+                )
+            disposables.add(newsDisposable)
         }
 
         awaitClose { disposables.dispose() }

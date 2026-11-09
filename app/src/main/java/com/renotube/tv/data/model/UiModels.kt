@@ -6,6 +6,8 @@ import com.liskovsoft.mediaserviceinterfaces.data.MediaItem
 import com.liskovsoft.mediaserviceinterfaces.data.MediaItemMetadata
 import com.liskovsoft.mediaserviceinterfaces.data.SponsorSegment
 
+private val SPLIT_REGEX = Regex("[•·|]")
+
 @Immutable
 data class VideoCardModel(
     val videoId: String,
@@ -60,14 +62,27 @@ data class VideoCardModel(
         }
 
         fun cleanAuthorAndDetails(rawAuthor: String?, rawSecondTitle: String?): Pair<String, String> {
-            val authorParts = (rawAuthor ?: "").split(Regex("[•·|]")).map { it.trim() }.filter { it.isNotEmpty() }
+            if (rawAuthor.isNullOrBlank() && rawSecondTitle.isNullOrBlank()) {
+                return Pair("", "")
+            }
+            val authorParts = if (!rawAuthor.isNullOrEmpty()) {
+                SPLIT_REGEX.split(rawAuthor).mapNotNull {
+                    val t = it.trim()
+                    if (t.isNotEmpty()) t else null
+                }
+            } else emptyList()
             val cleanAuthor = authorParts.firstOrNull { !it.startsWith("@") }
                 ?: authorParts.firstOrNull()
                 ?: ""
 
-            val secondParts = (rawSecondTitle ?: "").split(Regex("[•·|]")).map { it.trim() }.filter { it.isNotEmpty() }
-            val cleanSecondParts = mutableListOf<String>()
+            val secondParts = if (!rawSecondTitle.isNullOrEmpty()) {
+                SPLIT_REGEX.split(rawSecondTitle).mapNotNull {
+                    val t = it.trim()
+                    if (t.isNotEmpty()) t else null
+                }
+            } else emptyList()
 
+            val cleanSecondParts = ArrayList<String>(secondParts.size)
             val authorNorm = cleanAuthor.replace(" ", "").lowercase()
             for (part in secondParts) {
                 if (part.equals(cleanAuthor, ignoreCase = true)) continue
@@ -84,7 +99,7 @@ data class VideoCardModel(
 
         private fun sanitizeUrl(rawUrl: String?, videoId: String?): String {
             if (rawUrl.isNullOrBlank()) {
-                return if (!videoId.isNullOrBlank()) "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" else ""
+                return if (!videoId.isNullOrBlank()) "https://i.ytimg.com/vi/$videoId/mqdefault.jpg" else ""
             }
             val trimmed = rawUrl.trim()
             if (!videoId.isNullOrBlank() && (
@@ -93,12 +108,12 @@ data class VideoCardModel(
                 trimmed.contains("/channel/") ||
                 trimmed.contains("/channels/")
             )) {
-                return "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+                return "https://i.ytimg.com/vi/$videoId/mqdefault.jpg"
             }
             return when {
                 trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
                 trimmed.startsWith("//") -> "https:$trimmed"
-                !videoId.isNullOrBlank() -> "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+                !videoId.isNullOrBlank() -> "https://i.ytimg.com/vi/$videoId/mqdefault.jpg"
                 else -> trimmed
             }
         }
@@ -114,10 +129,18 @@ data class SectionRowModel(
 ) {
     companion object {
         fun fromMediaGroup(group: MediaGroup): SectionRowModel {
-            val cards = group.mediaItems
-                ?.filter { it != null && !it.videoId.isNullOrBlank() }
-                ?.map { VideoCardModel.fromMediaItem(it) }
-                ?: emptyList()
+            val mediaItems = group.mediaItems
+            val cards = if (mediaItems.isNullOrEmpty()) {
+                emptyList()
+            } else {
+                val list = ArrayList<VideoCardModel>(mediaItems.size)
+                for (item in mediaItems) {
+                    if (item != null && !item.videoId.isNullOrBlank()) {
+                        list.add(VideoCardModel.fromMediaItem(item))
+                    }
+                }
+                list
+            }
 
             val fallbackTitle = when (group.type) {
                 MediaGroup.TYPE_TRENDING -> "Trending"
@@ -163,45 +186,56 @@ data class VideoPlaybackMetadata(
 ) {
     companion object {
         fun fromMediaItemMetadata(meta: MediaItemMetadata): VideoPlaybackMetadata {
-            val chaptersList = meta.chapters?.map {
-                ChapterModel(it.title ?: "", it.startTimeMs)
-            } ?: emptyList()
+            val metaChapters = meta.chapters
+            val chaptersList = if (metaChapters.isNullOrEmpty()) {
+                emptyList()
+            } else {
+                val list = ArrayList<ChapterModel>(metaChapters.size)
+                for (ch in metaChapters) {
+                    if (ch != null) {
+                        list.add(ChapterModel(ch.title ?: "", ch.startTimeMs))
+                    }
+                }
+                list
+            }
 
             val nextCard = meta.nextVideo?.let { VideoCardModel.fromMediaItem(it) }
-            val rawSuggestions = meta.suggestions?.flatMap { group ->
-                group.mediaItems?.map { VideoCardModel.fromMediaItem(it) } ?: emptyList()
-            } ?: emptyList()
-
-            val suggestionCards = mutableListOf<VideoCardModel>()
+            val suggestionCards = ArrayList<VideoCardModel>()
+            val seenVideoIds = HashSet<String>()
             if (nextCard != null && nextCard.videoId.isNotBlank()) {
                 suggestionCards.add(nextCard)
-            }
-            rawSuggestions.forEach { card ->
-                if (card.videoId.isNotBlank() && suggestionCards.none { it.videoId == card.videoId }) {
-                    suggestionCards.add(card)
-                }
+                seenVideoIds.add(nextCard.videoId)
             }
 
             // Populate multiple suggestion shelves matching YouTube TV layout & algorithm
             val sections = mutableListOf<SectionRowModel>()
-            meta.suggestions?.forEachIndexed { index, group ->
-                if (group != null) {
-                    val groupCards = group.mediaItems
-                        ?.filterNotNull()
-                        ?.filter { !it.videoId.isNullOrBlank() }
-                        ?.map { VideoCardModel.fromMediaItem(it) }
-                        ?: emptyList()
-                    if (groupCards.isNotEmpty()) {
-                        val rowTitle = group.title?.takeIf { it.isNotBlank() }
-                            ?: if (index == 0) "Up Next" else "Related Videos"
-                        sections.add(
-                            SectionRowModel(
-                                title = rowTitle,
-                                type = group.type,
-                                nextPageKey = group.nextPageKey,
-                                items = groupCards
+            val metaSuggestions = meta.suggestions
+            if (!metaSuggestions.isNullOrEmpty()) {
+                for ((index, group) in metaSuggestions.withIndex()) {
+                    val groupMediaItems = group?.mediaItems
+                    if (!groupMediaItems.isNullOrEmpty()) {
+                        val groupCards = ArrayList<VideoCardModel>(groupMediaItems.size)
+                        for (item in groupMediaItems) {
+                            if (item != null && !item.videoId.isNullOrBlank()) {
+                                val card = VideoCardModel.fromMediaItem(item)
+                                groupCards.add(card)
+                                if (seenVideoIds.add(card.videoId)) {
+                                    suggestionCards.add(card)
+                                }
+                            }
+                        }
+                        if (groupCards.isNotEmpty()) {
+                            val rowTitle = group.title?.takeIf { it.isNotBlank() }
+                                ?: if (index == 0) "Up Next" else "Related Videos"
+                            sections.add(
+                                SectionRowModel(
+                                    title = rowTitle,
+                                    type = group.type,
+                                    nextPageKey = group.nextPageKey,
+                                    items = groupCards
+                                )
                             )
-                        )
+                        }
                     }
                 }
             }

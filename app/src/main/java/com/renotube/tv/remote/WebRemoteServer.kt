@@ -123,7 +123,7 @@ class WebRemoteServer @Inject constructor(
                         }
                     }
                     path == "/api/status" -> {
-                        sendResponse(out, 200, "application/json", "{\"status\":\"running\",\"app\":\"RenoTube TV\",\"port\":$activePort}")
+                        sendResponse(out, 200, "application/json", "{\"status\":\"running\",\"app\":\"FreeTube TV\",\"port\":$activePort}")
                     }
                     path == "/api/player/status" || path == "/api/player" -> {
                         val json = RemoteCommandDispatcher.getPlayerStatusJson()

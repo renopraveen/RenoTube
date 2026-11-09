@@ -41,6 +41,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import com.renotube.tv.data.model.SectionRowModel
 import com.renotube.tv.ui.components.VideoCard
 import androidx.compose.foundation.shape.CircleShape
@@ -75,6 +78,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -99,6 +103,7 @@ fun SearchScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var isListening by remember { mutableStateOf(false) }
     var voiceError by remember { mutableStateOf<String?>(null) }
     var recognizedPartial by remember { mutableStateOf("") }
@@ -365,9 +370,11 @@ fun SearchScreen(
             } else if (uiState.searchResults.isNotEmpty()) {
                 // Search Results Shelf (5 rows x 10 cards = 50 top results)
                 val totalRows = uiState.searchResults.size
+                val searchListState = rememberLazyListState()
                 LazyColumn(
+                    state = searchListState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 32.dp)
+                    contentPadding = PaddingValues(top = 32.dp, bottom = 70.dp)
                 ) {
                     itemsIndexed(
                         items = uiState.searchResults,
@@ -382,8 +389,14 @@ fun SearchScreen(
                             onVideoLongClick = { selectedVideoForAction = it },
                             onVideoFocused = { cIndex, video ->
                                 viewModel.prefetchVideo(video.videoId)
+                                if (cIndex + 1 < section.items.size) {
+                                    viewModel.prefetchVideo(section.items[cIndex + 1].videoId)
+                                }
                                 if (cIndex > 0) {
                                     isKeyboardMinimized = true
+                                }
+                                coroutineScope.launch {
+                                    searchListState.animateScrollToItem(rIndex)
                                 }
                             },
                             onLeftFromFirstCard = {
@@ -1035,6 +1048,11 @@ private fun SearchSectionRow(
 ) {
     if (section.items.isEmpty()) return
 
+    val rowState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val scrollOffsetPx = remember(density) { with(density) { 90.dp.roundToPx() } }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -1049,8 +1067,9 @@ private fun SearchSectionRow(
         )
 
         LazyRow(
-            contentPadding = PaddingValues(horizontal = 14.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            state = rowState,
+            contentPadding = PaddingValues(start = 20.dp, end = 50.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
             itemsIndexed(
@@ -1063,7 +1082,14 @@ private fun SearchSectionRow(
                     focusRequester = if (cIndex == 0) firstResultFocusRequester else null,
                     onClick = { onVideoClick(video) },
                     onLongClick = { onVideoLongClick(video) },
-                    onFocused = { onVideoFocused(cIndex, video) },
+                    onFocused = {
+                        onVideoFocused(cIndex, video)
+                        val targetIndex = (cIndex - 3).coerceAtLeast(0)
+                        val offsetPx = if (cIndex <= 2) 0 else scrollOffsetPx
+                        coroutineScope.launch {
+                            rowState.animateScrollToItem(targetIndex, offsetPx)
+                        }
+                    },
                     isFirstInRow = (cIndex == 0),
                     isLastInRow = (cIndex == section.items.lastIndex),
                     onLeftBoundaryPress = {

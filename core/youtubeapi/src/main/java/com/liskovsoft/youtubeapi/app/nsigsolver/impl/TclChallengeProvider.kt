@@ -31,7 +31,9 @@ internal object TclChallengeProvider {
     )
     private val solverOutputType = object : TypeToken<SolverOutput>() {}.type
     private var v8Runtime: V8? = null
-    private val v8Lock = Any()
+    private val tclExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "TclChallengeWorker").apply { isDaemon = true }
+    }
     private const val cacheSection = "tcl-challenge-solver"
 
     private data class SolverOutput(val type: String?, val results: Map<String, String>?, val error: String?, val preprocessed_player: String?)
@@ -73,12 +75,15 @@ internal object TclChallengeProvider {
         val stdin = "JSON.stringify(tclSolver(${Gson().toJson(request)}));"
 
         val stdout = try {
-            synchronized(v8Lock) {
-                initRuntime()
-                val result = runV8(stdin)
-                shutdownIfNeeded()
-                result
-            }
+            tclExecutor.submit(java.util.concurrent.Callable {
+                try {
+                    initRuntime()
+                    runV8(stdin)
+                } catch (e: Exception) {
+                    shutdownIfNeeded()
+                    throw e
+                }
+            }).get(15, java.util.concurrent.TimeUnit.SECONDS)
         } catch (e: Exception) {
             Log.e(tag, "TCL n-function solve failed: ${e.message}")
             return nParams.associateWith { null }
@@ -137,3 +142,4 @@ internal object TclChallengeProvider {
         v8Runtime = null
     }
 }
+

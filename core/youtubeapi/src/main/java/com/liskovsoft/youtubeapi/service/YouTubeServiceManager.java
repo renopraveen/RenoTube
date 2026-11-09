@@ -41,6 +41,13 @@ public class YouTubeServiceManager implements ServiceManager {
         return sInstance;
     }
 
+    public static void warmUpV8Engine() {
+        try {
+            com.liskovsoft.youtubeapi.app.nsigsolver.impl.V8ChallengeProvider.INSTANCE.warmUpAsync();
+        } catch (Throwable ignored) {
+        }
+    }
+
     @Override
     public SignInService getSignInService() {
         return getYouTubeSignInService();

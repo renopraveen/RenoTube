@@ -298,6 +298,7 @@ fun PlayerScreen(
     val playerRootRequester = remember { FocusRequester() }
     val playPauseRequester = remember { FocusRequester() }
     val scrubberRequester = remember { FocusRequester() }
+    val backButtonRequester = remember { FocusRequester() }
     val upNextFirstCardRequester = remember { FocusRequester() }
     val settingsFirstItemRequester = remember { FocusRequester() }
     val webRemoteCloseRequester = remember { FocusRequester() }
@@ -485,8 +486,8 @@ fun PlayerScreen(
                             } else false
                         }
                         Key.DirectionUp -> {
-                            if (showQuickSettings || showWebRemoteQr) {
-                                false // Pass up so QuickSettings LazyColumn can be navigated
+                            if (showQuickSettings || showWebRemoteQr || osdLevel == 2) {
+                                false // Pass up so QuickSettings and Up Next panel handle their own vertical navigation
                             } else if (osdLevel == 0) {
                                 // 1st UP press on clean screen: Open playback controls and focus scrubber
                                 osdLevel = 1
@@ -494,14 +495,15 @@ fun PlayerScreen(
                                 try { scrubberRequester.requestFocus() } catch (_: Exception) {}
                                 true
                             } else if (osdLevel == 1) {
-                                // UP from controls row: focus scrubber directly
-                                try { scrubberRequester.requestFocus() } catch (_: Exception) {}
-                                true
-                            } else if (osdLevel == 2) {
-                                // UP from Up Next shelf: return to controls row
-                                osdLevel = 1
-                                try { playPauseRequester.requestFocus() } catch (_: Exception) {}
-                                true
+                                if (isScrubberFocused) {
+                                    // UP from Scrubber: focus Back button in top bar
+                                    try { backButtonRequester.requestFocus() } catch (_: Exception) {}
+                                    true
+                                } else {
+                                    // UP from controls row: focus scrubber directly
+                                    try { scrubberRequester.requestFocus() } catch (_: Exception) {}
+                                    true
+                                }
                             } else false
                         }
                         Key.MediaRewind -> {
@@ -596,6 +598,7 @@ fun PlayerScreen(
                                 true
                             } else if (osdLevel == 2) {
                                 osdLevel = 1
+                                try { playPauseRequester.requestFocus() } catch (_: Exception) {}
                                 true
                             } else if (osdLevel == 1) {
                                 osdLevel = 0
@@ -894,6 +897,10 @@ fun PlayerScreen(
                     PlayerIconButton(
                         icon = Icons.Default.ArrowBack,
                         contentDescription = "Back",
+                        focusRequester = backButtonRequester,
+                        onDownPress = {
+                            try { scrubberRequester.requestFocus() } catch (_: Exception) {}
+                        },
                         onClick = {
                             viewModel.stopPlayback()
                             onBack()
@@ -1003,6 +1010,10 @@ fun PlayerScreen(
                                     when (keyEvent.key) {
                                         Key.DirectionDown -> {
                                             try { playPauseRequester.requestFocus() } catch (_: Exception) {}
+                                            true
+                                        }
+                                        Key.DirectionUp -> {
+                                            try { backButtonRequester.requestFocus() } catch (_: Exception) {}
                                             true
                                         }
                                         Key.DirectionLeft -> {
@@ -1379,182 +1390,268 @@ fun PlayerScreen(
                         }
                     }
 
-                    // 4. Tri-Row Up Next Shelf (Visible on osdLevel 2 - Second DOWN press)
+                    // 4. YouTube TV-Style "Up Next" Right Panel (osdLevel 2 — second DOWN press)
+                    //    Appears as a translucent right-side panel with a vertical list of large cards,
+                    //    matching the official YouTube TV recommendations layout.
                     if (osdLevel == 2 && uiState.metadata?.suggestions?.isNotEmpty() == true) {
-                        val suggestionSections = uiState.metadata?.suggestionSections ?: emptyList()
-                        val seenShelfVideoIds = HashSet<String>()
-                        val currentPlayingId = uiState.metadata?.videoId ?: ""
-                        if (currentPlayingId.isNotBlank()) {
-                            seenShelfVideoIds.add(currentPlayingId)
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                }
+            }
+        }
+
+        // ── YouTube TV-Style Up Next Right Panel (osdLevel == 2) ─────────────────
+        // Overlaid as a sibling of the player/OSD, so it fills the full screen height
+        // and floats on the right side exactly like the official YouTube TV app.
+        if ((osdLevel == 2) && uiState.metadata?.suggestions?.isNotEmpty() == true) {
+            val allSuggestions = run {
+                val seenIds = HashSet<String>()
+                val currentId = uiState.metadata?.videoId ?: uiState.videoId
+                if (currentId.isNotBlank()) seenIds.add(currentId)
+                uiState.metadata?.suggestions?.filter {
+                    it.videoId.isNotBlank() && seenIds.add(it.videoId)
+                } ?: emptyList()
+            }
+
+            // FocusRequesters: one per card (up to 30)
+            val panelRequesters = remember { List(30) { FocusRequester() } }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+            ) {
+                // Semi-transparent left scrim so the video is still visible
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = {
+                                osdLevel = 1
+                                lastInteractionTime = System.currentTimeMillis()
+                                try { playPauseRequester.requestFocus() } catch (_: Exception) {}
+                            }
+                        )
+                )
+
+                // Right panel: mirrors YouTube TV's Up Next sidebar
+                Column(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.38f)   // ~38% of screen width, matching YouTube TV
+                        .align(Alignment.CenterEnd)
+                        .background(Color(0xEA0F0F0F))  // near-black, slightly transparent
+                        .padding(top = 24.dp, bottom = 16.dp, start = 16.dp, end = 20.dp)
+                ) {
+                    // Panel header
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                    ) {
+                        Text(
+                            text = "Up Next",
+                            color = YouTubeWhite,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (autoplayEnabled) {
+                            Text(
+                                text = "Autoplay",
+                                color = Color(0xFF4CAF50),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
+                    }
 
-                        val row1Section = suggestionSections.getOrNull(0) ?: SectionRowModel(
-                            title = "Up Next",
-                            items = uiState.metadata?.suggestions?.take(10) ?: emptyList()
-                        )
-                        val row1Filtered = row1Section.items.filter { it.videoId.isNotBlank() && seenShelfVideoIds.add(it.videoId) }.take(10)
-                        val row1 = row1Section.copy(items = row1Filtered)
+                    // Vertical scrollable list of recommendation cards
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        contentPadding = PaddingValues(bottom = 48.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        itemsIndexed(
+                            items = allSuggestions,
+                            key = { idx, s -> "upnext_panel_${s.videoId}_$idx" }
+                        ) { idx, suggestion ->
+                            val cardRequester = if (idx == 0) upNextFirstCardRequester else panelRequesters.getOrElse(idx) { FocusRequester() }
+                            var isCardFocused by remember { mutableStateOf(false) }
 
-                        val row2Section = suggestionSections.getOrNull(1)
-                        val row2Filtered = (row2Section?.items ?: uiState.metadata?.suggestions?.drop(10) ?: emptyList())
-                            .filter { it.videoId.isNotBlank() && seenShelfVideoIds.add(it.videoId) }.take(10)
-                        val row2 = SectionRowModel(
-                            title = row2Section?.title ?: if (!uiState.metadata?.author.isNullOrBlank()) "More from ${uiState.metadata?.author}" else "Related Videos",
-                            items = row2Filtered
-                        )
-
-                        val row3Section = suggestionSections.getOrNull(2)
-                        val row3Filtered = (row3Section?.items ?: uiState.metadata?.suggestions?.drop(20) ?: emptyList())
-                            .filter { it.videoId.isNotBlank() && seenShelfVideoIds.add(it.videoId) }.take(10)
-                        val row3 = SectionRowModel(
-                            title = row3Section?.title ?: "Recommended for You",
-                            items = row3Filtered
-                        )
-
-                        val allRows = listOf(row1, row2, row3).filter { it.items.isNotEmpty() }
-                        val upNextScrollState = rememberScrollState()
-                        var focusedRowIndex by remember { mutableStateOf(0) }
-                        var focusedColIndex by remember { mutableStateOf(0) }
-                        val rowRequesters = remember { List(3) { List(10) { FocusRequester() } } }
-
-                        LaunchedEffect(focusedRowIndex) {
-                            upNextScrollState.animateScrollTo(focusedRowIndex * 220)
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                            // Calculate exact card width so 4 columns fit evenly across the screen width
-                            val totalWidth = maxWidth
-                            val calculatedCardWidth = ((totalWidth - 36.dp - 8.dp) / 4).coerceAtLeast(180.dp)
-
-                            Column(
+                            // YouTube TV-style horizontal card: thumbnail left, info right
+                            Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(max = 380.dp)
-                                    .verticalScroll(upNextScrollState)
-                            ) {
-                                allRows.forEachIndexed { rIndex, rowSection ->
-                                    if (rIndex > 0) {
-                                        Spacer(modifier = Modifier.height(10.dp))
-                                    }
-
-                                    // Shelf Header
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
-                                    ) {
-                                        Text(
-                                            text = rowSection.title,
-                                            color = YouTubeWhite,
-                                            fontSize = 15.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        if (rIndex == 0 && autoplayEnabled) {
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Text(
-                                                text = "• Auto-playing next",
-                                                color = Color(0xFF4CAF50),
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Medium
-                                            )
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        if (isCardFocused) Color(0xFF222222) else Color.Transparent
+                                    )
+                                    .border(
+                                        width = if (isCardFocused) 2.dp else 0.dp,
+                                        color = if (isCardFocused) YouTubeFocusedBorder else Color.Transparent,
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                    .focusRequester(cardRequester)
+                                    .onFocusChanged { fs ->
+                                        isCardFocused = fs.isFocused
+                                        if (fs.isFocused) {
+                                            lastInteractionTime = System.currentTimeMillis()
+                                            viewModel.prefetchVideo(suggestion.videoId)
                                         }
                                     }
-
-                                    Spacer(modifier = Modifier.height(6.dp))
-
-                                    LazyRow(
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                        contentPadding = PaddingValues(horizontal = 4.dp),
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        itemsIndexed(
-                                            items = rowSection.items,
-                                            key = { cIndex, suggestion -> "upnext_r${rIndex}_${suggestion.videoId}_$cIndex" }
-                                        ) { cIndex, suggestion ->
-                                            val itemRequester = if (rIndex == 0 && cIndex == 0) upNextFirstCardRequester else rowRequesters[rIndex][cIndex]
-                                            VideoCard(
-                                                video = suggestion,
-                                                onClick = {
+                                    .focusable(true)
+                                    .onKeyEvent { keyEvent ->
+                                        if (keyEvent.type == KeyEventType.KeyDown) {
+                                            lastInteractionTime = System.currentTimeMillis()
+                                            when (keyEvent.key) {
+                                                Key.DirectionCenter, Key.Enter -> {
                                                     osdLevel = 0
                                                     viewModel.setOsdVisible(false)
                                                     try { playerRootRequester.requestFocus() } catch (_: Exception) {}
                                                     onVideoSelected(suggestion)
-                                                },
-                                                onLongClick = {
-                                                    selectedVideoForAction = suggestion
-                                                },
-                                                cardWidth = calculatedCardWidth,
-                                                modifier = Modifier.focusRequester(itemRequester),
-                                                isFirstInRow = (cIndex == 0),
-                                                isLastInRow = (cIndex == rowSection.items.lastIndex),
-                                                onFocused = {
-                                                    lastInteractionTime = System.currentTimeMillis()
-                                                    focusedRowIndex = rIndex
-                                                    focusedColIndex = cIndex
-                                                    viewModel.prefetchVideo(suggestion.videoId)
-                                                },
-                                                onLeftBoundaryPress = {
-                                                    lastInteractionTime = System.currentTimeMillis()
-                                                    if (cIndex == 0) {
-                                                        true // Stay on first card of row, do not lose cursor
-                                                    } else {
-                                                        try {
-                                                            if (rIndex == 0 && cIndex - 1 == 0) {
-                                                                upNextFirstCardRequester.requestFocus()
-                                                            } else {
-                                                                rowRequesters[rIndex][cIndex - 1].requestFocus()
-                                                            }
-                                                        } catch (_: Exception) {}
-                                                        true
-                                                    }
-                                                },
-                                                onRightBoundaryPress = {
-                                                    lastInteractionTime = System.currentTimeMillis()
-                                                    if (cIndex == rowSection.items.lastIndex) {
-                                                        true // Stay on last card of row
-                                                    } else {
-                                                        try {
-                                                            rowRequesters[rIndex][cIndex + 1].requestFocus()
-                                                        } catch (_: Exception) {}
-                                                        true
-                                                    }
-                                                },
-                                                onUpBoundaryPress = {
-                                                    lastInteractionTime = System.currentTimeMillis()
-                                                    if (rIndex == 0) {
+                                                    true
+                                                }
+                                                Key.DirectionUp -> {
+                                                    if (idx == 0) {
+                                                        // Top of panel -> go back to controls
                                                         osdLevel = 1
                                                         try { playPauseRequester.requestFocus() } catch (_: Exception) {}
-                                                        true
                                                     } else {
-                                                        val targetCol = minOf(cIndex, allRows[rIndex - 1].items.lastIndex)
                                                         try {
-                                                            if (rIndex - 1 == 0 && targetCol == 0) {
-                                                                upNextFirstCardRequester.requestFocus()
-                                                            } else {
-                                                                rowRequesters[rIndex - 1][targetCol].requestFocus()
-                                                            }
+                                                            if (idx - 1 == 0) upNextFirstCardRequester.requestFocus()
+                                                            else panelRequesters.getOrNull(idx - 1)?.requestFocus()
                                                         } catch (_: Exception) {}
-                                                        true
                                                     }
-                                                },
-                                                onDownBoundaryPress = {
-                                                    lastInteractionTime = System.currentTimeMillis()
-                                                    if (rIndex >= allRows.lastIndex) {
-                                                        true // Clamp on bottom row: do not lose cursor
-                                                    } else {
-                                                        val targetCol = minOf(cIndex, allRows[rIndex + 1].items.lastIndex)
-                                                        try {
-                                                            rowRequesters[rIndex + 1][targetCol].requestFocus()
-                                                        } catch (_: Exception) {}
-                                                        true
-                                                    }
+                                                    true
                                                 }
+                                                Key.DirectionDown -> {
+                                                    if (idx < allSuggestions.lastIndex) {
+                                                        try { panelRequesters.getOrNull(idx + 1)?.requestFocus() } catch (_: Exception) {}
+                                                    }
+                                                    // Clamp at bottom: stay on last card
+                                                    true
+                                                }
+                                                Key.DirectionLeft -> {
+                                                    // Left from panel -> close panel, return to controls
+                                                    osdLevel = 1
+                                                    try { playPauseRequester.requestFocus() } catch (_: Exception) {}
+                                                    true
+                                                }
+                                                Key.DirectionRight -> true // Clamp: no action on right edge
+                                                Key.Back, Key.Escape -> {
+                                                    osdLevel = 1
+                                                    try { playPauseRequester.requestFocus() } catch (_: Exception) {}
+                                                    true
+                                                }
+                                                else -> false
+                                            }
+                                        } else false
+                                    }
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null,
+                                        onClick = {
+                                            osdLevel = 0
+                                            viewModel.setOsdVisible(false)
+                                            try { playerRootRequester.requestFocus() } catch (_: Exception) {}
+                                            onVideoSelected(suggestion)
+                                        }
+                                    )
+                                    .padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Thumbnail (16:9 ratio, ~108dp wide)
+                                Box(
+                                    modifier = Modifier
+                                        .width(108.dp)
+                                        .height(60.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(Color(0xFF1A1A1A))
+                                ) {
+                                    val thumbUrl = suggestion.thumbnailUrl.takeIf { it.isNotBlank() }
+                                        ?: "https://i.ytimg.com/vi/${suggestion.videoId}/mqdefault.jpg"
+                                    AsyncImage(
+                                        model = thumbUrl,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    // Duration badge (bottom-right)
+                                    if (suggestion.durationText.isNotBlank()) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.BottomEnd)
+                                                .padding(3.dp)
+                                                .background(Color(0xCC000000), RoundedCornerShape(3.dp))
+                                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                                        ) {
+                                            Text(
+                                                text = suggestion.durationText,
+                                                color = YouTubeWhite,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                    // "Up Next" badge on first card when autoplay enabled
+                                    if (idx == 0 && autoplayEnabled) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopStart)
+                                                .padding(3.dp)
+                                                .background(YouTubeRed, RoundedCornerShape(3.dp))
+                                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                                        ) {
+                                            Text(
+                                                text = "Up Next",
+                                                color = YouTubeWhite,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold
                                             )
                                         }
                                     }
                                 }
-                                Spacer(modifier = Modifier.height(16.dp))
+
+                                Spacer(modifier = Modifier.width(10.dp))
+
+                                // Video metadata
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        text = suggestion.title,
+                                        color = if (isCardFocused) YouTubeWhite else YouTubeWhite.copy(alpha = 0.92f),
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isCardFocused) FontWeight.Bold else FontWeight.SemiBold,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        lineHeight = 16.sp
+                                    )
+                                    if (suggestion.author.isNotBlank()) {
+                                        Text(
+                                            text = suggestion.author,
+                                            color = YouTubeSecondaryText,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Normal,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    if (suggestion.secondTitle.isNotBlank()) {
+                                        Text(
+                                            text = suggestion.secondTitle,
+                                            color = YouTubeSecondaryText.copy(alpha = 0.75f),
+                                            fontSize = 10.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

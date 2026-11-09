@@ -6,4 +6,6 @@
     <color name="youtube_white">#FFFFFF</color>
     <color name="youtube_gray">#AAAAAA</color>
     <color name="youtube_divider">#3D3D3D</color>
+    <color name="icon_background_black">#000000</color>
+    <color name="ic_launcher_background">#0F0F0F</color>
 </resources>

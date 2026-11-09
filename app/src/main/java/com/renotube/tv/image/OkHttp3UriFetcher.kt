@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import okio.buffer
 import okio.source
 import java.io.File
@@ -32,26 +33,43 @@ class OkHttp3UriFetcher(
         val cacheFile = File(cacheDir, "$hash.img")
 
         // 1. Check local persistent disk cache (0-3ms load time)
-        if (cacheFile.exists() && cacheFile.length() > 0) {
-            try {
-                return@withContext SourceResult(
-                    source = ImageSource(source = cacheFile.source().buffer(), context = options.context),
-                    mimeType = "image/jpeg",
-                    dataSource = DataSource.DISK
-                )
-            } catch (e: Exception) {
+        if (cacheFile.exists()) {
+            if (cacheFile.length() < 1500) {
+                // Delete invalid/cached 1097-byte YouTube 404 placeholder
                 cacheFile.delete()
+            } else {
+                try {
+                    return@withContext SourceResult(
+                        source = ImageSource(source = cacheFile.source().buffer(), context = options.context),
+                        mimeType = "image/jpeg",
+                        dataSource = DataSource.DISK
+                    )
+                } catch (e: Exception) {
+                    cacheFile.delete()
+                }
             }
         }
 
         // 2. Network fetch with optimized YouTube headers
-        val request = Request.Builder()
-            .url(urlString)
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-            .header("Referer", "https://www.youtube.com/")
-            .build()
+        var response = executeRequest(urlString)
 
-        val response = client.newCall(request).execute()
+        // Resilient YouTube CDN Fallback: If high-res thumbnail 404s or returns placeholder (<= 1500 bytes), try standard mqdefault.jpg & hqdefault.jpg
+        val videoId = extractYouTubeVideoId(urlString)
+        val bodyLen = response.body()?.contentLength() ?: 0L
+        if (!response.isSuccessful || (bodyLen in 1..1500)) {
+            if (videoId != null) {
+                response.close()
+                val mqUrl = "https://i.ytimg.com/vi/$videoId/mqdefault.jpg"
+                response = executeRequest(mqUrl)
+                val mqLen = response.body()?.contentLength() ?: 0L
+                if (!response.isSuccessful || (mqLen in 1..1500)) {
+                    response.close()
+                    val hqUrl = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+                    response = executeRequest(hqUrl)
+                }
+            }
+        }
+
         if (!response.isSuccessful) {
             response.close()
             throw IOException("HTTP ${response.code()}: ${response.message()}")
@@ -68,8 +86,10 @@ class OkHttp3UriFetcher(
                     input.copyTo(output)
                 }
             }
-            if (tempFile.length() > 0) {
+            if (tempFile.length() > 1500) {
                 tempFile.renameTo(cacheFile)
+            } else {
+                tempFile.delete()
             }
         } catch (e: Exception) {
             tempFile.delete()
@@ -89,6 +109,20 @@ class OkHttp3UriFetcher(
         }
     }
 
+    private fun executeRequest(targetUrl: String): Response {
+        val request = Request.Builder()
+            .url(targetUrl)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+            .header("Referer", "https://www.youtube.com/")
+            .build()
+        return client.newCall(request).execute()
+    }
+
+    private fun extractYouTubeVideoId(url: String): String? {
+        val regex = Regex("""/vi(?:_webp)?/([a-zA-Z0-9_-]{11})""")
+        return regex.find(url)?.groupValues?.get(1)
+    }
+
     private fun md5(input: String): String {
         val md = MessageDigest.getInstance("MD5")
         return md.digest(input.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
@@ -104,4 +138,3 @@ class OkHttp3UriFetcher(
         }
     }
 }
-

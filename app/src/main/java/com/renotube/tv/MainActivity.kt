@@ -45,14 +45,29 @@ import dagger.hilt.android.AndroidEntryPoint
 import androidx.lifecycle.lifecycleScope
 import com.renotube.tv.remote.RemoteCommandDispatcher
 import com.renotube.tv.remote.WebRemoteServer
+import com.renotube.tv.update.OtaUpdateManager
+import com.renotube.tv.update.UpdateDialog
+import androidx.compose.runtime.collectAsState
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var webRemoteServer: WebRemoteServer
+
+    @Inject
+    lateinit var otaUpdateManager: OtaUpdateManager
+
+    @Inject
+    lateinit var contentRepository: com.renotube.tv.data.repository.ContentRepository
 
     private val homeViewModel: HomeViewModel by viewModels()
     private val searchViewModel: SearchViewModel by viewModels()
@@ -62,6 +77,21 @@ class MainActivity : ComponentActivity() {
     val activeVideoIdState = mutableStateOf<String?>(null)
     val isSidebarExpandedState = mutableStateOf(false)
     val currentRouteState = mutableStateOf("home")
+
+    // Screen-off / TV standby broadcast receiver: pause video gracefully when TV is powered off
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                android.util.Log.i("MainActivity", "TV screen turned off — pausing playback & saving watch history")
+                if (activeVideoIdState.value != null) {
+                    playerViewModel.exoPlayer.pause()
+                    val posSec = playerViewModel.uiState.value.currentPositionMs / 1000f
+                    val durSec = playerViewModel.uiState.value.durationMs / 1000f
+                    playerViewModel.syncWatchHistoryToYouTube(posSec, durSec)
+                }
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,6 +104,15 @@ class MainActivity : ComponentActivity() {
             webRemoteServer.start(this)
         }
 
+        // Register screen-off receiver to handle TV power-off gracefully
+        val screenOffFilter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(screenOffReceiver, screenOffFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(screenOffReceiver, screenOffFilter)
+        }
+
         setContent {
             RenoTubeTheme {
                 MainTvShell(
@@ -81,10 +120,118 @@ class MainActivity : ComponentActivity() {
                     searchViewModel = searchViewModel,
                     playerViewModel = playerViewModel,
                     settingsViewModel = settingsViewModel,
+                    otaUpdateManager = otaUpdateManager,
                     activeVideoIdState = activeVideoIdState,
                     isSidebarExpandedState = isSidebarExpandedState,
                     currentRouteState = currentRouteState
                 )
+            }
+        }
+
+        // Proactively warm up V8 JavaScript Challenge Solver engine in background after UI renders
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            kotlinx.coroutines.delay(2000)
+            try {
+                com.liskovsoft.youtubeapi.service.YouTubeServiceManager.warmUpV8Engine()
+            } catch (_: Throwable) {}
+        }
+
+        // Handle Fire TV Alexa voice search or deep-link intents
+        handleVoiceAndDeepLinkIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleVoiceAndDeepLinkIntent(intent)
+    }
+
+    private fun handleVoiceAndDeepLinkIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action ?: return
+        android.util.Log.i("MainActivity", "Processing intent action: $action, data: ${intent.data}")
+
+        when (action) {
+            Intent.ACTION_SEARCH -> {
+                val query = intent.getStringExtra(android.app.SearchManager.QUERY)
+                    ?: intent.getStringExtra("query")
+                    ?: intent.getStringExtra(Intent.EXTRA_TEXT)
+                if (!query.isNullOrBlank()) {
+                    android.util.Log.i("MainActivity", "Alexa/Voice search query received: $query")
+                    onRemoteSearch(query)
+                }
+            }
+            "android.media.action.MEDIA_PLAY_FROM_SEARCH" -> {
+                val query = intent.getStringExtra(android.app.SearchManager.QUERY)
+                    ?: intent.getStringExtra("query")
+                if (!query.isNullOrBlank()) {
+                    android.util.Log.i("MainActivity", "Voice media play intent: '$query'")
+                    lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        try {
+                            val results = contentRepository.search(query)
+                            val topVideo = results.flatMap { it.items }.firstOrNull { it.videoId.isNotBlank() }
+                            if (topVideo != null) {
+                                runOnUiThread {
+                                    onRemotePlay(topVideo.videoId)
+                                }
+                            } else {
+                                runOnUiThread {
+                                    onRemoteSearch(query)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                onRemoteSearch(query)
+                            }
+                        }
+                    }
+                }
+            }
+            "com.amazon.device.contentlauncher.SEARCH" -> {
+                val query = intent.getStringExtra("com.amazon.device.contentlauncher.extra.SEARCH_STRING")
+                    ?: intent.getStringExtra("searchTerm")
+                    ?: intent.getStringExtra("query")
+                if (!query.isNullOrBlank()) {
+                    android.util.Log.i("MainActivity", "Fire TV Content Launcher voice search: $query")
+                    onRemoteSearch(query)
+                }
+            }
+            Intent.ACTION_VIEW -> {
+                val uri = intent.data
+                val extraVideoId = intent.getStringExtra("videoId")
+                    ?: intent.getStringExtra("video_id")
+                    ?: intent.getStringExtra("v")
+                if (!extraVideoId.isNullOrBlank()) {
+                    android.util.Log.i("MainActivity", "Direct videoId extra received: $extraVideoId")
+                    onRemotePlay(extraVideoId)
+                } else if (uri != null) {
+                    android.util.Log.i("MainActivity", "Deep link received: $uri")
+                    val scheme = uri.scheme
+                    if (scheme == "renotube" || scheme == "freetube") {
+                        val host = uri.host
+                        if (host == "video") {
+                            val videoId = uri.lastPathSegment
+                            if (!videoId.isNullOrBlank()) {
+                                onRemotePlay(videoId)
+                            }
+                        } else if (host == "search") {
+                            val query = uri.getQueryParameter("q")
+                            if (!query.isNullOrBlank()) {
+                                onRemoteSearch(query)
+                            }
+                        }
+                    } else if (scheme == "vnd.youtube") {
+                        val videoId = uri.schemeSpecificPart?.substringBefore("?")?.substringAfter(":")
+                        if (!videoId.isNullOrBlank()) {
+                            onRemotePlay(videoId)
+                        }
+                    } else if (uri.host?.contains("youtube") == true || uri.host == "youtu.be") {
+                        val videoId = uri.getQueryParameter("v") ?: uri.lastPathSegment
+                        if (!videoId.isNullOrBlank()) {
+                            onRemotePlay(videoId)
+                        }
+                    }
+                }
             }
         }
     }
@@ -92,6 +239,19 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Home button pressed, another app opens, or TV goes to standby
+        // Pause playback gracefully and save watch history position
+        if (activeVideoIdState.value != null && playerViewModel.exoPlayer.isPlaying) {
+            android.util.Log.i("MainActivity", "onPause: pausing playback & syncing watch history")
+            playerViewModel.exoPlayer.pause()
+            val posSec = playerViewModel.uiState.value.currentPositionMs / 1000f
+            val durSec = playerViewModel.uiState.value.durationMs / 1000f
+            playerViewModel.syncWatchHistoryToYouTube(posSec, durSec)
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -105,6 +265,8 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         RemoteCommandDispatcher.unregisterActivity(this)
         webRemoteServer.stop()
+        // Unregister the screen-off receiver to avoid memory leaks
+        try { unregisterReceiver(screenOffReceiver) } catch (_: Exception) {}
     }
 
     fun onRemoteHome() {
@@ -249,45 +411,95 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.action == KeyEvent.ACTION_DOWN) {
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_MEDIA_STOP -> {
+        return try {
+            if (event.keyCode == KeyEvent.KEYCODE_BACK || event.keyCode == KeyEvent.KEYCODE_ESCAPE) {
+                if (event.action == KeyEvent.ACTION_UP) {
+                    // 1. If any Compose BackHandler is active (e.g. Settings right pane, Action Modal), let it handle back
+                    if (onBackPressedDispatcher.hasEnabledCallbacks()) {
+                        onBackPressedDispatcher.onBackPressed()
+                        return true
+                    }
+                    // 2. If video player is playing, return to browsing
                     if (activeVideoIdState.value != null) {
                         playerViewModel.stopPlayback()
                         activeVideoIdState.value = null
+                        return true
+                    }
+                    // 3. If on a non-home route (Settings, Search), return to Home screen
+                    if (currentRouteState.value != "home") {
+                        currentRouteState.value = "home"
+                        isSidebarExpandedState.value = false
+                        return true
+                    }
+                    // 4. While on home feed: 1st back opens sidebar menu, 2nd back exits app
+                    if (!isSidebarExpandedState.value) {
+                        isSidebarExpandedState.value = true
+                        return true
+                    } else {
+                        finish()
                         return true
                     }
                 }
-                KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ESCAPE -> {
-                    // Always allow Compose BackHandler (e.g. VideoActionModal, dialogs) to process back first!
-                    val handled = super.dispatchKeyEvent(event)
-                    if (handled) {
-                        return true
-                    }
+                return true
+            }
 
-                    if (activeVideoIdState.value != null) {
-                        // Failsafe: if nothing in Compose consumed BACK while player was open, close player cleanly
-                        playerViewModel.stopPlayback()
-                        activeVideoIdState.value = null
-                        return true
-                    } else {
-                        // While surfing main screen: 1st back opens sidebar menu, 2nd back exits app
-                        if (!isSidebarExpandedState.value) {
-                            isSidebarExpandedState.value = true
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_MEDIA_STOP -> {
+                        if (activeVideoIdState.value != null) {
+                            playerViewModel.stopPlayback()
+                            activeVideoIdState.value = null
                             return true
-                        } else {
-                            finish()
+                        }
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                        if (activeVideoIdState.value != null) {
+                            playerViewModel.togglePlayPause()
+                            return true
+                        }
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                        if (activeVideoIdState.value != null) {
+                            playerViewModel.exoPlayer.play()
+                            return true
+                        }
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                        if (activeVideoIdState.value != null) {
+                            playerViewModel.exoPlayer.pause()
+                            return true
+                        }
+                    }
+                    KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                        if (activeVideoIdState.value != null) {
+                            playerViewModel.seekRelative(10000L)
+                            return true
+                        }
+                    }
+                    KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                        if (activeVideoIdState.value != null) {
+                            playerViewModel.seekRelative(-10000L)
+                            return true
+                        }
+                    }
+                    KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                        if (activeVideoIdState.value != null) {
+                            playerViewModel.playNextVideo()
+                            return true
+                        }
+                    }
+                    KeyEvent.KEYCODE_INFO, KeyEvent.KEYCODE_GUIDE, KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_BOOKMARK -> {
+                        if (activeVideoIdState.value != null) {
+                            playerViewModel.setOsdVisible(true)
                             return true
                         }
                     }
                 }
             }
-        }
-        return try {
             super.dispatchKeyEvent(event)
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             // Protect against Compose focus search bugs on Android TV (e.g. LayoutCoordinate / isAttached == false)
-            android.util.Log.w("MainActivity", "Handled Compose focus traversal anomaly: ${e.message}")
+            android.util.Log.w("MainActivity", "Handled Compose focus traversal anomaly: ${t.message}")
             true
         }
     }
@@ -300,12 +512,20 @@ fun MainTvShell(
     searchViewModel: SearchViewModel,
     playerViewModel: PlayerViewModel,
     settingsViewModel: SettingsViewModel,
+    otaUpdateManager: OtaUpdateManager,
     activeVideoIdState: MutableState<String?>,
     isSidebarExpandedState: MutableState<Boolean>,
     currentRouteState: MutableState<String>
 ) {
     val currentRoute = currentRouteState.value
     val activeVideoId = activeVideoIdState.value
+    val updateState by otaUpdateManager.updateState.collectAsState()
+
+    // Automatically check for OTA update 4 seconds after app starts up in background
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(4000)
+        otaUpdateManager.checkForUpdates(manual = false)
+    }
 
     // Automatically change WLED Ambilight to warm white and refresh personalized feed whenever user returns to Home / browsing screen
     LaunchedEffect(activeVideoId) {
@@ -451,5 +671,14 @@ fun MainTvShell(
                 }
             }
         }
+
+        // OTA Update Leanback Dialog Popup Overlay
+        UpdateDialog(
+            updateState = updateState,
+            onStartDownload = { info -> otaUpdateManager.startDownload(info) },
+            onCancelDownload = { otaUpdateManager.cancelDownload() },
+            onInstallApk = { file -> otaUpdateManager.installApk(file) },
+            onDismiss = { otaUpdateManager.dismiss() }
+        )
     }
 }

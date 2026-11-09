@@ -172,11 +172,6 @@ class CpuAmbilightEngine(
         val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         val httpFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
             .setUserAgent(userAgent)
-            .setDefaultRequestProperties(mapOf(
-                "User-Agent" to userAgent,
-                "Origin" to "https://www.youtube.com",
-                "Referer" to "https://www.youtube.com/"
-            ))
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(8_000)
             .setReadTimeoutMs(10_000)

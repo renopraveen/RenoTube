@@ -1,5 +1,8 @@
 package com.renotube.tv.ui.screens.settings
 
+import androidx.activity.compose.BackHandler
+import android.view.SoundEffectConstants
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -112,11 +115,17 @@ fun SettingsScreen(
     var selectedCategory by remember { mutableStateOf(SettingsCategory.ACCOUNTS) }
     var isMenuFocused by remember { mutableStateOf(true) }
 
-    val menuWidth by animateDpAsState(
-        targetValue = if (isMenuFocused) 230.dp else 68.dp,
-        animationSpec = tween(durationMillis = 200),
-        label = "settingsMenuWidth"
-    )
+    val menuWidth = 240.dp
+    val activeCategoryRequester = remember { FocusRequester() }
+    val rightPaneInitialFocusRequester = remember { FocusRequester() }
+
+    // When focus is inside the right pane, Back returns focus to the active category in the left rail
+    BackHandler(enabled = !isMenuFocused) {
+        try {
+            activeCategoryRequester.requestFocus()
+            isMenuFocused = true
+        } catch (_: Exception) {}
+    }
 
     Row(
         modifier = modifier
@@ -124,13 +133,8 @@ fun SettingsScreen(
             .background(YouTubeBlack)
             .padding(start = 28.dp, end = 28.dp, top = 20.dp, bottom = 20.dp)
             .focusGroup()
-            .focusProperties {
-                down = FocusRequester.Cancel
-            }
     ) {
-        val activeCategoryRequester = remember { FocusRequester() }
-
-        // ── LEFT PANE: Vertical Category Navigation (Collapsible LazyColumn) ──
+        // ── LEFT PANE: Stable, Fixed-Width Vertical Category Navigation (Leanback TV Standard) ──
         LazyColumn(
             modifier = Modifier
                 .width(menuWidth)
@@ -139,17 +143,13 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             item {
-                if (isMenuFocused) {
-                    Text(
-                        text = "Settings",
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = YouTubeWhite,
-                        modifier = Modifier.padding(bottom = 14.dp, start = 8.dp)
-                    )
-                } else {
-                    Spacer(modifier = Modifier.height(24.dp))
-                }
+                Text(
+                    text = "Settings",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = YouTubeWhite,
+                    modifier = Modifier.padding(bottom = 14.dp, start = 8.dp)
+                )
             }
 
             itemsIndexed(SettingsCategory.values()) { _, category ->
@@ -157,10 +157,14 @@ fun SettingsScreen(
                 CategoryNavItem(
                     category = category,
                     isSelected = isSelected,
-                    isMenuExpanded = isMenuFocused,
                     focusRequester = if (isSelected) activeCategoryRequester else null,
                     onNavigateToSidebar = onNavigateToSidebar,
                     onSelect = { selectedCategory = category },
+                    onRequestFocusRightPane = {
+                        try {
+                            rightPaneInitialFocusRequester.requestFocus()
+                        } catch (_: Exception) {}
+                    },
                     onFocusChanged = { focused ->
                         if (focused) isMenuFocused = true
                     }
@@ -168,9 +172,9 @@ fun SettingsScreen(
             }
         }
 
-        Spacer(modifier = Modifier.width(if (isMenuFocused) 24.dp else 32.dp))
+        Spacer(modifier = Modifier.width(28.dp))
 
-        // ── RIGHT PANE: Category Details Layout (Expands when menu collapses) ─
+        // ── RIGHT PANE: Category Details Layout ─
         val scrollState = rememberScrollState()
         Column(
             modifier = Modifier
@@ -189,24 +193,26 @@ fun SettingsScreen(
                 .padding(bottom = 64.dp)
         ) {
             when (selectedCategory) {
-                SettingsCategory.ACCOUNTS -> AccountsSettings(viewModel)
+                SettingsCategory.ACCOUNTS -> AccountsSettings(viewModel, rightPaneInitialFocusRequester)
                 SettingsCategory.AUTOPLAY -> AutoplaySettings(
                     autoplayEnabled = autoplayEnabled,
-                    onToggle = { viewModel.toggleAutoplay(it) }
+                    onToggle = { viewModel.toggleAutoplay(it) },
+                    initialFocusRequester = rightPaneInitialFocusRequester
                 )
-                SettingsCategory.WEB_REMOTE -> WebRemoteSettings(viewModel)
+                SettingsCategory.WEB_REMOTE -> WebRemoteSettings(viewModel, rightPaneInitialFocusRequester)
                 SettingsCategory.AMBILIGHT -> AmbilightSettings(
                     config = config,
                     testStatus = testStatus,
                     detectStatus = detectStatus,
                     isEdgeTestActive = isEdgeTestActive,
                     isCornerTestActive = isCornerTestActive,
-                    viewModel = viewModel
+                    viewModel = viewModel,
+                    initialFocusRequester = rightPaneInitialFocusRequester
                 )
-                SettingsCategory.VIDEO_AUDIO -> VideoAudioSettings(viewModel)
-                SettingsCategory.SPONSORBLOCK -> SponsorBlockSettings(viewModel)
-                SettingsCategory.RESTRICTED_MODE -> RestrictedModeSettings()
-                SettingsCategory.ABOUT -> AboutDeviceSettings()
+                SettingsCategory.VIDEO_AUDIO -> VideoAudioSettings(viewModel, rightPaneInitialFocusRequester)
+                SettingsCategory.SPONSORBLOCK -> SponsorBlockSettings(viewModel, rightPaneInitialFocusRequester)
+                SettingsCategory.RESTRICTED_MODE -> RestrictedModeSettings(rightPaneInitialFocusRequester)
+                SettingsCategory.ABOUT -> AboutDeviceSettings(viewModel, rightPaneInitialFocusRequester)
             }
         }
     }
@@ -216,17 +222,18 @@ fun SettingsScreen(
 private fun CategoryNavItem(
     category: SettingsCategory,
     isSelected: Boolean,
-    isMenuExpanded: Boolean,
     focusRequester: FocusRequester? = null,
     onNavigateToSidebar: (() -> Unit)? = null,
     onSelect: () -> Unit,
+    onRequestFocusRightPane: () -> Unit,
     onFocusChanged: (Boolean) -> Unit
 ) {
     var isFocused by remember { mutableStateOf(false) }
+    val view = LocalView.current
 
     var rowModifier = Modifier
         .fillMaxWidth()
-        .padding(vertical = 4.dp)
+        .padding(vertical = 3.dp)
         .clip(RoundedCornerShape(24.dp))
 
     if (focusRequester != null) {
@@ -235,7 +242,7 @@ private fun CategoryNavItem(
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = if (isMenuExpanded) Arrangement.Start else Arrangement.Center,
+        horizontalArrangement = Arrangement.Start,
         modifier = rowModifier
             .onFocusChanged {
                 isFocused = it.isFocused
@@ -245,21 +252,25 @@ private fun CategoryNavItem(
                 }
             }
             .border(
-                width = if (isFocused) 2.dp else 0.dp,
+                width = if (isFocused) 2.5.dp else 0.dp,
                 color = if (isFocused) YouTubeFocusedBorder else Color.Transparent,
                 shape = RoundedCornerShape(24.dp)
             )
             .background(
                 when {
                     isFocused -> YouTubeWhite
-                    isSelected -> YouTubeSurface
+                    isSelected -> Color(0xFF2C2C2C)
                     else -> Color.Transparent
                 }
             )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
-                onClick = onSelect
+                onClick = {
+                    view.playSoundEffect(SoundEffectConstants.CLICK)
+                    onSelect()
+                    onRequestFocusRightPane()
+                }
             )
             .onKeyEvent { keyEvent ->
                 if (keyEvent.type == KeyEventType.KeyDown) {
@@ -270,16 +281,18 @@ private fun CategoryNavItem(
                                 true
                             } else false
                         }
+                        Key.DirectionRight, Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                            view.playSoundEffect(SoundEffectConstants.CLICK)
+                            onRequestFocusRightPane()
+                            true
+                        }
                         Key.DirectionDown -> category == SettingsCategory.ABOUT
                         Key.DirectionUp -> category == SettingsCategory.ACCOUNTS
                         else -> false
                     }
                 } else false
             }
-            .padding(
-                horizontal = if (isMenuExpanded) 16.dp else 10.dp,
-                vertical = 12.dp
-            )
+            .padding(horizontal = 16.dp, vertical = 11.dp)
     ) {
         Icon(
             imageVector = category.icon,
@@ -291,27 +304,26 @@ private fun CategoryNavItem(
             },
             modifier = Modifier.size(20.dp)
         )
-        if (isMenuExpanded) {
-            Spacer(modifier = Modifier.width(14.dp))
-            Text(
-                text = category.title,
-                fontSize = 15.sp,
-                fontWeight = if (isFocused || isSelected) FontWeight.Bold else FontWeight.Medium,
-                color = when {
-                    isFocused -> YouTubeBlack
-                    isSelected -> YouTubeWhite
-                    else -> YouTubeSecondaryText
-                },
-                maxLines = 1
-            )
-        }
+        Spacer(modifier = Modifier.width(14.dp))
+        Text(
+            text = category.title,
+            fontSize = 15.sp,
+            fontWeight = if (isFocused || isSelected) FontWeight.Bold else FontWeight.Medium,
+            color = when {
+                isFocused -> YouTubeBlack
+                isSelected -> YouTubeWhite
+                else -> YouTubeSecondaryText
+            },
+            maxLines = 1
+        )
     }
 }
 
 @Composable
 private fun AutoplaySettings(
     autoplayEnabled: Boolean,
-    onToggle: (Boolean) -> Unit
+    onToggle: (Boolean) -> Unit,
+    initialFocusRequester: FocusRequester? = null
 ) {
     SettingsDetailHeader(
         title = "Autoplay",
@@ -323,7 +335,8 @@ private fun AutoplaySettings(
             title = "Autoplay next video",
             subtitle = "When finished watching a video, another video will start playing automatically",
             checked = autoplayEnabled,
-            onCheckedChange = onToggle
+            onCheckedChange = onToggle,
+            focusRequester = initialFocusRequester
         )
     }
 }
@@ -335,7 +348,8 @@ private fun AmbilightSettings(
     detectStatus: WledDetectState,
     isEdgeTestActive: Boolean,
     isCornerTestActive: Boolean,
-    viewModel: SettingsViewModel
+    viewModel: SettingsViewModel,
+    initialFocusRequester: FocusRequester? = null
 ) {
     var editingIp by remember { mutableStateOf(false) }
     var ipInput by remember(config.wledIp) { mutableStateOf(config.wledIp) }
@@ -351,7 +365,8 @@ private fun AmbilightSettings(
             title = "Enable Ambilight Sync",
             subtitle = "Streams real-time edge colors over UDP to your ESP32 running WLED",
             checked = config.enabled,
-            onCheckedChange = { viewModel.toggleAmbilight(it) }
+            onCheckedChange = { viewModel.toggleAmbilight(it) },
+            focusRequester = initialFocusRequester
         )
     }
 
@@ -740,7 +755,10 @@ private fun AmbilightSettings(
 }
 
 @Composable
-private fun WebRemoteSettings(viewModel: SettingsViewModel) {
+private fun WebRemoteSettings(
+    viewModel: SettingsViewModel,
+    initialFocusRequester: FocusRequester? = null
+) {
     SettingsDetailHeader(
         title = "Mobile & Web Remote Control",
         subtitle = "Control FreeTube and type using your phone's keyboard"
@@ -774,12 +792,17 @@ private fun WebRemoteSettings(viewModel: SettingsViewModel) {
                 )
                 Spacer(modifier = Modifier.height(10.dp))
 
+                var urlBoxMod = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF222222))
+                    .border(1.5.dp, Color(0xFF4CAF50), RoundedCornerShape(10.dp))
+                    .padding(vertical = 12.dp, horizontal = 16.dp)
+                if (initialFocusRequester != null) {
+                    urlBoxMod = urlBoxMod.focusRequester(initialFocusRequester).focusable()
+                }
+
                 Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF222222))
-                        .border(1.5.dp, Color(0xFF4CAF50), RoundedCornerShape(10.dp))
-                        .padding(vertical = 12.dp, horizontal = 16.dp)
+                    modifier = urlBoxMod
                 ) {
                     Text(
                         text = viewModel.webRemoteUrl,
@@ -807,7 +830,10 @@ private fun WebRemoteSettings(viewModel: SettingsViewModel) {
 }
 
 @Composable
-private fun VideoAudioSettings(viewModel: SettingsViewModel) {
+private fun VideoAudioSettings(
+    viewModel: SettingsViewModel,
+    initialFocusRequester: FocusRequester? = null
+) {
     val voiceBoost by viewModel.voiceBoostEnabled.collectAsState()
     val afrEnabled by viewModel.afrEnabled.collectAsState()
     val blockedCount by viewModel.blockedChannelCount.collectAsState()
@@ -823,7 +849,8 @@ private fun VideoAudioSettings(viewModel: SettingsViewModel) {
             title = "Voice Clarity (Dialogue Boost)",
             subtitle = "Enhances vocal compression (+6dB vocal band) so speech is crisp over heavy background music",
             checked = voiceBoost,
-            onCheckedChange = { viewModel.toggleVoiceBoost(it) }
+            onCheckedChange = { viewModel.toggleVoiceBoost(it) },
+            focusRequester = initialFocusRequester
         )
 
         Spacer(modifier = Modifier.height(14.dp))
@@ -912,7 +939,10 @@ private fun VideoAudioSettings(viewModel: SettingsViewModel) {
 }
 
 @Composable
-private fun SponsorBlockSettings(viewModel: SettingsViewModel) {
+private fun SponsorBlockSettings(
+    viewModel: SettingsViewModel,
+    initialFocusRequester: FocusRequester? = null
+) {
     val sponsorBlockEnabled by viewModel.sponsorBlockEnabled.collectAsState()
     val adBlockEnabled by viewModel.adBlockEnabled.collectAsState()
 
@@ -926,7 +956,8 @@ private fun SponsorBlockSettings(viewModel: SettingsViewModel) {
             title = "Enable SponsorBlock Auto-Skip",
             subtitle = "Automatically skips sponsor segments, subscribe reminders, and intro animations",
             checked = sponsorBlockEnabled,
-            onCheckedChange = { viewModel.toggleSponsorBlock(it) }
+            onCheckedChange = { viewModel.toggleSponsorBlock(it) },
+            focusRequester = initialFocusRequester
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -951,7 +982,7 @@ private fun SponsorBlockSettings(viewModel: SettingsViewModel) {
 }
 
 @Composable
-private fun RestrictedModeSettings() {
+private fun RestrictedModeSettings(initialFocusRequester: FocusRequester? = null) {
     SettingsDetailHeader(
         title = "Restricted Mode",
         subtitle = "Restricted Mode helps hide potentially mature videos"
@@ -962,13 +993,17 @@ private fun RestrictedModeSettings() {
             title = "Restricted Mode",
             subtitle = "No filter is 100% accurate, but this helps you avoid mature content",
             checked = false,
-            onCheckedChange = {}
+            onCheckedChange = {},
+            focusRequester = initialFocusRequester
         )
     }
 }
 
 @Composable
-private fun AccountsSettings(viewModel: SettingsViewModel) {
+private fun AccountsSettings(
+    viewModel: SettingsViewModel,
+    initialFocusRequester: FocusRequester? = null
+) {
     val accountState by viewModel.accountState.collectAsState()
 
     SettingsDetailHeader(
@@ -1004,11 +1039,13 @@ private fun AccountsSettings(viewModel: SettingsViewModel) {
             if (accountState.isSigned) {
                 TvActionButton(
                     text = "Sign Out",
+                    focusRequester = initialFocusRequester,
                     onClick = { viewModel.signOut() }
                 )
             } else {
                 TvActionButton(
                     text = if (accountState.isSigningIn) "Generating..." else "Sign In with QR / Code",
+                    focusRequester = initialFocusRequester,
                     onClick = { viewModel.startSignIn() }
                 )
             }
@@ -1081,7 +1118,10 @@ private fun AccountsSettings(viewModel: SettingsViewModel) {
 }
 
 @Composable
-private fun AboutDeviceSettings() {
+private fun AboutDeviceSettings(
+    viewModel: SettingsViewModel,
+    initialFocusRequester: FocusRequester? = null
+) {
     val context = LocalContext.current
     val perfMetrics by PerformanceTracker.metrics.collectAsState()
     var crashLog by remember { mutableStateOf(CrashHandler.getLastCrashReport(context)) }
@@ -1092,13 +1132,65 @@ private fun AboutDeviceSettings() {
     )
 
     SettingsDetailCard {
-        SettingsDetailInfoRow("App Version", "1.4.0-leanback")
+        SettingsDetailInfoRow("App Version", "v${com.renotube.tv.BuildConfig.VERSION_NAME} (Leanback Edition)")
         Spacer(modifier = Modifier.height(10.dp))
-        SettingsDetailInfoRow("Target Device", "Sony BRAVIA 2 4K Ultra HD (K-55S25B)")
+        SettingsDetailInfoRow("Target Platform", "Android TV / Google TV (${android.os.Build.SUPPORTED_ABIS.firstOrNull()?.uppercase() ?: "ARM"})")
         Spacer(modifier = Modifier.height(10.dp))
-        SettingsDetailInfoRow("Android TV OS", "Google TV 14 (ARM64)")
+        SettingsDetailInfoRow("Android TV OS", "API ${android.os.Build.VERSION.SDK_INT} (${android.os.Build.VERSION.RELEASE})")
         Spacer(modifier = Modifier.height(10.dp))
-        SettingsDetailInfoRow("Viewing Algorithm Memory", "Top 100 View History (<40KB compact footprint)")
+        SettingsDetailInfoRow("GitHub Repository", "${com.renotube.tv.update.OtaUpdateManager.GITHUB_OWNER}/${com.renotube.tv.update.OtaUpdateManager.GITHUB_REPO}")
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    // OTA Software Updates Card
+    SettingsDetailCard {
+        val updateState by viewModel.updateState.collectAsState()
+        val isChecking = updateState is com.renotube.tv.update.UpdateState.Checking
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
+                Text(
+                    text = "OTA Software Updates",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = YouTubeWhite
+                )
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = when (updateState) {
+                        is com.renotube.tv.update.UpdateState.Checking -> "Connecting to GitHub Releases..."
+                        is com.renotube.tv.update.UpdateState.UpdateAvailable -> "New version available: ${(updateState as com.renotube.tv.update.UpdateState.UpdateAvailable).info.versionName}"
+                        is com.renotube.tv.update.UpdateState.NoUpdateAvailable -> "You are up to date (v${com.renotube.tv.BuildConfig.VERSION_NAME})."
+                        is com.renotube.tv.update.UpdateState.Downloading -> "Downloading update in background..."
+                        is com.renotube.tv.update.UpdateState.DownloadReady -> "Update downloaded and ready to install."
+                        is com.renotube.tv.update.UpdateState.Error -> (updateState as com.renotube.tv.update.UpdateState.Error).message
+                        else -> "Checks GitHub (renopraveen/FreeTube) for new releases & downloads APK directly to TV"
+                    },
+                    fontSize = 13.sp,
+                    color = when (updateState) {
+                        is com.renotube.tv.update.UpdateState.UpdateAvailable -> Color(0xFF4CAF50)
+                        is com.renotube.tv.update.UpdateState.Error -> YouTubeRed
+                        else -> YouTubeSecondaryText
+                    }
+                )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TvSelectablePill(
+                    label = if (isChecking) "Checking..." else "Check for Updates",
+                    isSelected = false,
+                    focusRequester = initialFocusRequester,
+                    onClick = {
+                        viewModel.checkForUpdates(manual = true, forceShowEvenIfSame = false)
+                    }
+                )
+            }
+        }
     }
 
     Spacer(modifier = Modifier.height(16.dp))
@@ -1175,33 +1267,67 @@ private fun SettingsToggleRow(
     title: String,
     subtitle: String,
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null
 ) {
     var isFocused by remember { mutableStateOf(false) }
+    val view = LocalView.current
+
+    var rowModifier = modifier
+        .fillMaxWidth()
+        .clip(RoundedCornerShape(10.dp))
+
+    if (focusRequester != null) {
+        rowModifier = rowModifier.focusRequester(focusRequester)
+    }
 
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+        modifier = rowModifier
             .onFocusChanged { isFocused = it.isFocused }
             .border(
-                width = if (isFocused) 2.dp else 0.dp,
+                width = if (isFocused) 2.5.dp else 0.dp,
                 color = if (isFocused) YouTubeFocusedBorder else Color.Transparent,
-                shape = RoundedCornerShape(8.dp)
+                shape = RoundedCornerShape(10.dp)
             )
-            .background(if (isFocused) YouTubeWhite.copy(alpha = 0.08f) else Color.Transparent)
-            .clickable { onCheckedChange(!checked) }
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .background(if (isFocused) Color(0xFF282828) else Color.Transparent)
+            .clickable {
+                view.playSoundEffect(SoundEffectConstants.CLICK)
+                onCheckedChange(!checked)
+            }
+            .onKeyEvent { keyEvent ->
+                if (keyEvent.type == KeyEventType.KeyDown &&
+                    (keyEvent.key == Key.DirectionCenter || keyEvent.key == Key.Enter || keyEvent.key == Key.NumPadEnter)
+                ) {
+                    view.playSoundEffect(SoundEffectConstants.CLICK)
+                    onCheckedChange(!checked)
+                    return@onKeyEvent true
+                }
+                false
+            }
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
-            Text(text = title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = YouTubeWhite)
-            Text(text = subtitle, fontSize = 13.sp, color = YouTubeSecondaryText)
+            Text(
+                text = title,
+                fontSize = 15.sp,
+                fontWeight = if (isFocused) FontWeight.Bold else FontWeight.SemiBold,
+                color = if (isFocused) YouTubeWhite else YouTubeWhite.copy(alpha = 0.92f)
+            )
+            Text(
+                text = subtitle,
+                fontSize = 13.sp,
+                color = if (isFocused) YouTubeWhite.copy(alpha = 0.8f) else YouTubeSecondaryText
+            )
         }
         Switch(
             checked = checked,
-            onCheckedChange = onCheckedChange,
+            onCheckedChange = {
+                view.playSoundEffect(SoundEffectConstants.CLICK)
+                onCheckedChange(it)
+            },
             colors = SwitchDefaults.colors(
                 checkedThumbColor = YouTubeWhite,
                 checkedTrackColor = YouTubeRed,
@@ -1254,18 +1380,37 @@ private fun LedCountStepper(
 @Composable
 private fun TvSmallButton(text: String, onClick: () -> Unit) {
     var isFocused by remember { mutableStateOf(false) }
+    val view = LocalView.current
 
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
             .size(28.dp)
-            .onFocusChanged { isFocused = it.isFocused }
             .clip(CircleShape)
-            .border(if (isFocused) 1.5.dp else 0.dp, if (isFocused) YouTubeFocusedBorder else Color.Transparent, CircleShape)
-            .background(if (isFocused) YouTubeRed else Color(0xFF444444))
-            .clickable(onClick = onClick)
+            .onFocusChanged { isFocused = it.isFocused }
+            .border(if (isFocused) 2.dp else 0.dp, if (isFocused) YouTubeFocusedBorder else Color.Transparent, CircleShape)
+            .background(if (isFocused) YouTubeWhite else Color(0xFF444444))
+            .clickable {
+                view.playSoundEffect(SoundEffectConstants.CLICK)
+                onClick()
+            }
+            .onKeyEvent { keyEvent ->
+                if (keyEvent.type == KeyEventType.KeyDown &&
+                    (keyEvent.key == Key.DirectionCenter || keyEvent.key == Key.Enter || keyEvent.key == Key.NumPadEnter)
+                ) {
+                    view.playSoundEffect(SoundEffectConstants.CLICK)
+                    onClick()
+                    return@onKeyEvent true
+                }
+                false
+            }
     ) {
-        Text(text = text, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = YouTubeWhite)
+        Text(
+            text = text,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (isFocused) YouTubeBlack else YouTubeWhite
+        )
     }
 }
 
@@ -1273,22 +1418,44 @@ private fun TvSmallButton(text: String, onClick: () -> Unit) {
 private fun TvActionButton(
     text: String,
     icon: ImageVector? = null,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null
 ) {
     var isFocused by remember { mutableStateOf(false) }
+    val view = LocalView.current
+
+    var buttonModifier = modifier
+        .clip(RoundedCornerShape(8.dp))
+
+    if (focusRequester != null) {
+        buttonModifier = buttonModifier.focusRequester(focusRequester)
+    }
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
+        modifier = buttonModifier
             .onFocusChanged { isFocused = it.isFocused }
-            .clip(RoundedCornerShape(8.dp))
             .border(
-                width = if (isFocused) 2.dp else 0.dp,
+                width = if (isFocused) 2.5.dp else 0.dp,
                 color = if (isFocused) YouTubeFocusedBorder else Color.Transparent,
                 shape = RoundedCornerShape(8.dp)
             )
             .background(if (isFocused) YouTubeWhite else Color(0xFF333333))
-            .clickable(onClick = onClick)
+            .clickable {
+                view.playSoundEffect(SoundEffectConstants.CLICK)
+                onClick()
+            }
+            .onKeyEvent { keyEvent ->
+                if (keyEvent.type == KeyEventType.KeyDown &&
+                    (keyEvent.key == Key.DirectionCenter || keyEvent.key == Key.Enter || keyEvent.key == Key.NumPadEnter)
+                ) {
+                    view.playSoundEffect(SoundEffectConstants.CLICK)
+                    onClick()
+                    return@onKeyEvent true
+                }
+                false
+            }
             .padding(horizontal = 14.dp, vertical = 8.dp)
     ) {
         if (icon != null) {
@@ -1313,31 +1480,61 @@ private fun TvActionButton(
 private fun TvSelectablePill(
     label: String,
     isSelected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null
 ) {
     var isFocused by remember { mutableStateOf(false) }
+    val view = LocalView.current
+
+    var pillModifier = modifier
+        .clip(RoundedCornerShape(16.dp))
+
+    if (focusRequester != null) {
+        pillModifier = pillModifier.focusRequester(focusRequester)
+    }
 
     Box(
         contentAlignment = Alignment.Center,
-        modifier = Modifier
+        modifier = pillModifier
             .onFocusChanged { isFocused = it.isFocused }
-            .clip(RoundedCornerShape(16.dp))
             .border(
-                width = if (isFocused) 2.dp else 0.dp,
+                width = if (isFocused) 2.5.dp else 0.dp,
                 color = if (isFocused) YouTubeFocusedBorder else Color.Transparent,
                 shape = RoundedCornerShape(16.dp)
             )
             .background(
-                if (isSelected) YouTubeRed else if (isFocused) Color(0xFF444444) else Color(0xFF2C2C2C)
+                when {
+                    isFocused -> YouTubeWhite
+                    isSelected -> YouTubeRed
+                    else -> Color(0xFF2C2C2C)
+                }
             )
-            .clickable(onClick = onClick)
+            .clickable {
+                view.playSoundEffect(SoundEffectConstants.CLICK)
+                onClick()
+            }
+            .onKeyEvent { keyEvent ->
+                if (keyEvent.type == KeyEventType.KeyDown &&
+                    (keyEvent.key == Key.DirectionCenter || keyEvent.key == Key.Enter || keyEvent.key == Key.NumPadEnter)
+                ) {
+                    view.playSoundEffect(SoundEffectConstants.CLICK)
+                    onClick()
+                    return@onKeyEvent true
+                }
+                false
+            }
             .padding(horizontal = 12.dp, vertical = 6.dp)
     ) {
         Text(
             text = label,
             fontSize = 12.sp,
-            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-            color = if (isSelected || isFocused) YouTubeWhite else YouTubeSecondaryText
+            fontWeight = if (isSelected || isFocused) FontWeight.Bold else FontWeight.Medium,
+            color = when {
+                isFocused -> YouTubeBlack
+                isSelected -> YouTubeWhite
+                else -> YouTubeSecondaryText
+            }
         )
     }
 }
