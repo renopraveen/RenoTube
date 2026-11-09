@@ -353,14 +353,14 @@ class PlayerViewModel @Inject constructor(
             Log.w(TAG, "Playback error caught in ViewModel: ${error.message} (${error.errorCodeName}). Attempting automatic recovery...")
             val currentId = _uiState.value.videoId
             if (currentId.isNotEmpty()) {
-                val savedPos = renoTubePlayer.currentPositionMs
+                val savedPos = maxOf(renoTubePlayer.currentPositionMs, _uiState.value.currentPositionMs)
                 viewModelScope.launch {
                     mediaRepository.invalidateFormat(currentId)
 
                     // 1. Instant In-Memory High-Res HLS Fallback:
                     // If current format contains an HLS manifest, switch to HLS immediately (0ms network request)
                     // maintaining full 4K / 1080p quality and resuming at the exact second
-                    if (!hasAttemptedHlsFallback && currentFormatInfo != null) {
+                    if (!hasAttemptedHlsFallback && currentFormatInfo != null && currentFormatInfo?.containsHlsUrl() == true) {
                         hasAttemptedHlsFallback = true
                         if (renoTubePlayer.playHlsFallback(currentFormatInfo, startPositionMs = savedPos)) {
                             Log.i(TAG, "Successfully failed over to High-Res HLS stream for $currentId at ${savedPos}ms")
@@ -369,8 +369,8 @@ class PlayerViewModel @Inject constructor(
                         }
                     }
 
-                    // 2. High-Res Client Format failover: Try switching to next high-res client (IOS -> VISIONOS -> WEB_SAFARI)
-                    if (currentPlaybackRetryCount < 2) {
+                    // 2. High-Res Client Format failover: Try switching to next high-res client (IOS -> VISIONOS -> ANDROID_VR -> WEB_SAFARI)
+                    if (currentPlaybackRetryCount < 3) {
                         currentPlaybackRetryCount++
                         Log.i(TAG, "Switching to next format client (attempt $currentPlaybackRetryCount) for $currentId at ${savedPos}ms")
                         mediaRepository.switchNextFormat(force = true)
@@ -402,41 +402,54 @@ class PlayerViewModel @Inject constructor(
 
         // Autoplay listener on video ended (with Loop support & Autoplay OFF Exit to Main Screen)
         renoTubePlayer.onPlaybackEndedListener = {
-            val durSec = renoTubePlayer.durationMs / 1000f
-            syncWatchHistoryToYouTube(durSec, durSec)
-            if (renoTubePlayer.isLoopEnabled()) {
-                Log.i(TAG, "Loop Video enabled: Replaying current video")
-                renoTubePlayer.seekTo(0)
-                renoTubePlayer.play()
-            } else if (_autoplayEnabled.value) {
-                val queued = playbackQueueManager.pollNext()
-                if (queued != null && queued.videoId.isNotEmpty()) {
-                    Log.i(TAG, "Autoplay: Playing queued next video '${queued.title}' (${queued.videoId})")
-                    loadVideo(
-                        videoId = queued.videoId,
-                        title = queued.title,
-                        author = queued.author,
-                        thumbnailUrl = queued.thumbnailUrl,
-                        clickTrackingParams = queued.clickTrackingParams
-                    )
-                } else {
-                    val currentMeta = _uiState.value.metadata
-                    val nextVideo = currentMeta?.nextVideo ?: currentMeta?.suggestions?.firstOrNull()
-                    if (nextVideo != null && nextVideo.videoId.isNotEmpty()) {
-                        Log.i(TAG, "Autoplay: Playing next video '${nextVideo.title}' (${nextVideo.videoId})")
-                        loadVideo(
-                            videoId = nextVideo.videoId,
-                            title = nextVideo.title,
-                            author = nextVideo.author,
-                            thumbnailUrl = nextVideo.thumbnailUrl,
-                            clickTrackingParams = nextVideo.clickTrackingParams
-                        )
-                    }
+            val curPosMs = renoTubePlayer.currentPositionMs
+            val durMs = renoTubePlayer.durationMs
+            val durSec = durMs / 1000f
+
+            // Guard against spurious / premature EOF (e.g. chunk drop in the middle of playback)
+            val isTrueEnd = durMs <= 0 || (durMs - curPosMs) < 5_000L
+            if (!isTrueEnd && curPosMs > 5_000L) {
+                Log.w(TAG, "ExoPlayer reported STATE_ENDED prematurely at ${curPosMs}ms of ${durMs}ms. Recovering stream...")
+                val currentId = _uiState.value.videoId
+                if (currentId.isNotEmpty()) {
+                    loadVideo(currentId, retryCount = 1, startPositionMs = curPosMs)
                 }
             } else {
-                Log.i(TAG, "Autoplay disabled: Video playback completed -> Exiting player back to main screen")
-                viewModelScope.launch {
-                    _playbackEndedExitFlow.emit(Unit)
+                syncWatchHistoryToYouTube(durSec, durSec)
+                if (renoTubePlayer.isLoopEnabled()) {
+                    Log.i(TAG, "Loop Video enabled: Replaying current video")
+                    renoTubePlayer.seekTo(0)
+                    renoTubePlayer.play()
+                } else if (_autoplayEnabled.value) {
+                    val queued = playbackQueueManager.pollNext()
+                    if (queued != null && queued.videoId.isNotEmpty()) {
+                        Log.i(TAG, "Autoplay: Playing queued next video '${queued.title}' (${queued.videoId})")
+                        loadVideo(
+                            videoId = queued.videoId,
+                            title = queued.title,
+                            author = queued.author,
+                            thumbnailUrl = queued.thumbnailUrl,
+                            clickTrackingParams = queued.clickTrackingParams
+                        )
+                    } else {
+                        val currentMeta = _uiState.value.metadata
+                        val nextVideo = currentMeta?.nextVideo ?: currentMeta?.suggestions?.firstOrNull()
+                        if (nextVideo != null && nextVideo.videoId.isNotEmpty()) {
+                            Log.i(TAG, "Autoplay: Playing next video '${nextVideo.title}' (${nextVideo.videoId})")
+                            loadVideo(
+                                videoId = nextVideo.videoId,
+                                title = nextVideo.title,
+                                author = nextVideo.author,
+                                thumbnailUrl = nextVideo.thumbnailUrl,
+                                clickTrackingParams = nextVideo.clickTrackingParams
+                            )
+                        }
+                    }
+                } else {
+                    Log.i(TAG, "Autoplay disabled: Video playback completed -> Exiting player back to main screen")
+                    viewModelScope.launch {
+                        _playbackEndedExitFlow.emit(Unit)
+                    }
                 }
             }
         }
@@ -572,7 +585,8 @@ class PlayerViewModel @Inject constructor(
                             author = author,
                             thumbnailUrl = thumbnailUrl,
                             clickTrackingParams = clickTrackingParams,
-                            retryCount = retryCount + 1
+                            retryCount = retryCount + 1,
+                            startPositionMs = startPositionMs
                         )
                         return@launch
                     } else {
@@ -588,7 +602,7 @@ class PlayerViewModel @Inject constructor(
                 }
 
                 // 2. Start ExoPlayer playback IMMEDIATELY
-                val playSuccess = renoTubePlayer.playFormatInfo(formatInfo)
+                val playSuccess = renoTubePlayer.playFormatInfo(formatInfo, startPositionMs = startPositionMs)
                 if (playSuccess) {
                     if (startPositionMs > 0) {
                         renoTubePlayer.seekTo(startPositionMs)
@@ -618,7 +632,8 @@ class PlayerViewModel @Inject constructor(
                             author = author,
                             thumbnailUrl = thumbnailUrl,
                             clickTrackingParams = clickTrackingParams,
-                            retryCount = retryCount + 1
+                            retryCount = retryCount + 1,
+                            startPositionMs = startPositionMs
                         )
                         return@launch
                     } else {

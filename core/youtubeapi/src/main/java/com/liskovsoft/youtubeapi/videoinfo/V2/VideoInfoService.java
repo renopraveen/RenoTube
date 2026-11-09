@@ -31,9 +31,9 @@ public class VideoInfoService extends VideoInfoServiceBase {
     private final VideoInfoApi mVideoInfoApi;
     // Prioritize fast unthrottled clients without BotGuard WebView delay or unplayable errors
     private final static AppClient[] VIDEO_INFO_TYPE_LIST = {
-            AppClient.ANDROID_VR,    // Direct Quest 3 client: Status=OK, 26 adaptive streams with direct URLs up to 4K, zero BotGuard, zero cipher
-            AppClient.IOS,           // Official iOS client: 4K UHD/1080p HLS streams, unblocked on music & copyrighted content
+            AppClient.IOS,           // Official iOS client: 4K UHD/1080p HLS streams, unblocked on music & copyrighted content, 0 n-param 403s
             AppClient.VISIONOS,      // Direct VisionOS format: 4K/1080p HLS and adaptive DASH
+            AppClient.ANDROID_VR,    // Direct Quest 3 client: Status=OK, 26 adaptive streams with direct URLs up to 4K
             AppClient.WEB_SAFARI,    // Direct fast Safari format
             AppClient.TV,            // TV client with auth
             AppClient.ANDROID,       // Direct Android mobile client: Status=OK, 29 streams + progressive MP4

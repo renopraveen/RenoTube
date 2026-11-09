@@ -844,15 +844,16 @@ class RenoTubePlayer @Inject constructor(
      * 2. HLS Manifest (formatInfo.hlsManifestUrl)
      * 3. Progressive URL (formatInfo.createUrlList())
      */
-    suspend fun playFormatInfo(formatInfo: MediaItemFormatInfo): Boolean = withContext(Dispatchers.IO) {
+    suspend fun playFormatInfo(formatInfo: MediaItemFormatInfo, startPositionMs: Long = 0L): Boolean = withContext(Dispatchers.IO) {
         val dataSourceFactory = createDataSourceFactory(formatInfo)
         val subtitleConfigs = buildSubtitleConfigurations(formatInfo)
+        val hlsUrl = if (formatInfo.containsHlsUrl()) formatInfo.hlsManifestUrl else null
 
-
-
-        // 2. Prepare DASH MPD atomically to prevent half-written/corrupt XML files
+        // 2. Prepare DASH MPD atomically if HLS is unavailable
         val mpdFile = File(context.cacheDir, "manifest_${formatInfo.videoId}.mpd")
-        val mpdReady = if (mpdFile.exists() && mpdFile.length() > 200 && (System.currentTimeMillis() - mpdFile.lastModified()) < 2 * 60 * 1000L) {
+        val mpdReady = if (!hlsUrl.isNullOrEmpty()) {
+            false // Prefer High-Res HLS: immune to 55s n-param 403 & 0ms disk write delay
+        } else if (mpdFile.exists() && mpdFile.length() > 200 && (System.currentTimeMillis() - mpdFile.lastModified()) < 2 * 60 * 1000L) {
             true
         } else {
             val mpdStream = try {
@@ -890,7 +891,6 @@ class RenoTubePlayer @Inject constructor(
             }
         }
 
-        val hlsUrl = if (formatInfo.containsHlsUrl()) formatInfo.hlsManifestUrl else null
         val progressiveUrl = if (!mpdReady && hlsUrl.isNullOrEmpty()) {
             formatInfo.createUrlList()?.firstOrNull { it.isNotEmpty() }
         } else null
@@ -907,9 +907,32 @@ class RenoTubePlayer @Inject constructor(
             )
             applyVideoResolution(manualResolutionHeight)
 
+            // 1. High-Resolution Apple HLS stream:
+            // Immune to YouTube 55-second n-param 403 errors, provides instant startup & full 4K UHD @ 60fps
+            if (!hlsUrl.isNullOrEmpty()) {
+                try {
+                    Log.i(TAG, "Playing via High-Res HLS Manifest: $hlsUrl with ${subtitleConfigs.size} caption track(s) (startPos=${startPositionMs}ms)")
+                    val mediaItem = Media3MediaItem.Builder()
+                        .setUri(hlsUrl)
+                        .setSubtitleConfigurations(subtitleConfigs)
+                        .build()
+                    val mediaSource = HlsMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+                    exoPlayer.setMediaSource(mediaSource)
+                    if (startPositionMs > 0) {
+                        exoPlayer.seekTo(startPositionMs)
+                    }
+                    exoPlayer.prepare()
+                    exoPlayer.playWhenReady = true
+                    return@withContext true
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error preparing HLS stream, falling back to DASH MPD: ${e.message}")
+                }
+            }
+
+            // 2. Local DASH MPD (for non-HLS clients like ANDROID_VR, TV, etc.)
             if (mpdReady) {
                 try {
-                    Log.i(TAG, "Playing via local DASH MPD (${mpdFile.length()} bytes) with ${subtitleConfigs.size} caption track(s)")
+                    Log.i(TAG, "Playing via local DASH MPD (${mpdFile.length()} bytes) with ${subtitleConfigs.size} caption track(s) (startPos=${startPositionMs}ms)")
                     val mediaItem = Media3MediaItem.Builder()
                         .setUri(Uri.fromFile(mpdFile))
                         .setMimeType(MimeTypes.APPLICATION_MPD)
@@ -917,6 +940,9 @@ class RenoTubePlayer @Inject constructor(
                         .build()
                     val mediaSource = DashMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
                     exoPlayer.setMediaSource(mediaSource)
+                    if (startPositionMs > 0) {
+                        exoPlayer.seekTo(startPositionMs)
+                    }
                     exoPlayer.prepare()
                     exoPlayer.playWhenReady = true
                     return@withContext true
@@ -925,29 +951,18 @@ class RenoTubePlayer @Inject constructor(
                 }
             }
 
-            // Fallback to HLS Manifest
-            if (!hlsUrl.isNullOrEmpty()) {
-                Log.i(TAG, "Playing via HLS Manifest: $hlsUrl with ${subtitleConfigs.size} caption track(s)")
-                val mediaItem = Media3MediaItem.Builder()
-                    .setUri(hlsUrl)
-                    .setSubtitleConfigurations(subtitleConfigs)
-                    .build()
-                val mediaSource = HlsMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
-                exoPlayer.setMediaSource(mediaSource)
-                exoPlayer.prepare()
-                exoPlayer.playWhenReady = true
-                return@withContext true
-            }
-
-            // Fallback to Progressive MP4 URL
+            // 3. Fallback to Progressive MP4 URL
             if (!progressiveUrl.isNullOrEmpty()) {
-                Log.i(TAG, "Playing via Progressive URL: $progressiveUrl with ${subtitleConfigs.size} caption track(s)")
+                Log.i(TAG, "Playing via Progressive URL: $progressiveUrl with ${subtitleConfigs.size} caption track(s) (startPos=${startPositionMs}ms)")
                 val mediaItem = Media3MediaItem.Builder()
                     .setUri(progressiveUrl)
                     .setSubtitleConfigurations(subtitleConfigs)
                     .build()
                 val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
                 exoPlayer.setMediaSource(mediaSource)
+                if (startPositionMs > 0) {
+                    exoPlayer.seekTo(startPositionMs)
+                }
                 exoPlayer.prepare()
                 exoPlayer.playWhenReady = true
                 return@withContext true
@@ -1026,13 +1041,25 @@ class RenoTubePlayer @Inject constructor(
     }
 
     fun seekTo(positionMs: Long) {
-        val target = positionMs.coerceIn(0, exoPlayer.duration.coerceAtLeast(0))
-        Log.d(TAG, "Seeking to ${target}ms")
+        val dur = exoPlayer.duration
+        val target = if (dur > 0L) {
+            positionMs.coerceIn(0L, dur)
+        } else {
+            positionMs.coerceAtLeast(0L)
+        }
+        Log.i(TAG, "Seeking to ${target}ms (duration: ${dur}ms)")
         exoPlayer.seekTo(target)
     }
 
     fun seekRelative(deltaMs: Long) {
-        val target = (exoPlayer.currentPosition + deltaMs).coerceIn(0, exoPlayer.duration.coerceAtLeast(0))
+        val cur = exoPlayer.currentPosition
+        val dur = exoPlayer.duration
+        val rawTarget = cur + deltaMs
+        val target = if (dur > 0L) {
+            rawTarget.coerceIn(0L, dur)
+        } else {
+            rawTarget.coerceAtLeast(0L)
+        }
         Log.d(TAG, "Seeking relative by ${deltaMs}ms -> target: ${target}ms")
         exoPlayer.seekTo(target)
     }
