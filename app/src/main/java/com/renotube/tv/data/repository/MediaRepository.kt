@@ -141,9 +141,12 @@ class MediaRepository @Inject constructor(
                 if (success) {
                     formatCache[videoId] = Pair(now, info!!)
                     ambilightLowResUrl = extractLowResVideoStreamUrl(info)
-                    try {
-                        getOrGenerateMpdFile(info)
-                    } catch (_: Exception) {}
+                    // Skip synchronous MPD XML disk writing if stream has native Apple HLS manifest (saves ~200ms latency)
+                    if (!info.containsHlsUrl()) {
+                        try {
+                            getOrGenerateMpdFile(info)
+                        } catch (_: Exception) {}
+                    }
                 }
                 info
             } finally {

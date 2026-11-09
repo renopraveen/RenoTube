@@ -392,9 +392,7 @@ fun SearchScreen(
                                 if (cIndex + 1 < section.items.size) {
                                     viewModel.prefetchVideo(section.items[cIndex + 1].videoId)
                                 }
-                                if (cIndex > 0) {
-                                    isKeyboardMinimized = true
-                                }
+                                isKeyboardMinimized = true
                                 coroutineScope.launch {
                                     searchListState.animateScrollToItem(rIndex)
                                 }
@@ -1051,7 +1049,8 @@ private fun SearchSectionRow(
     val rowState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
-    val scrollOffsetPx = remember(density) { with(density) { 90.dp.roundToPx() } }
+    val scrollOffsetPx = remember(density) { with(density) { 120.dp.roundToPx() } }
+    var scrollJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     Column(
         modifier = modifier
@@ -1068,7 +1067,7 @@ private fun SearchSectionRow(
 
         LazyRow(
             state = rowState,
-            contentPadding = PaddingValues(start = 20.dp, end = 50.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 96.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -1084,9 +1083,10 @@ private fun SearchSectionRow(
                     onLongClick = { onVideoLongClick(video) },
                     onFocused = {
                         onVideoFocused(cIndex, video)
-                        val targetIndex = (cIndex - 3).coerceAtLeast(0)
-                        val offsetPx = if (cIndex <= 2) 0 else scrollOffsetPx
-                        coroutineScope.launch {
+                        val targetIndex = (cIndex - 2).coerceAtLeast(0)
+                        val offsetPx = if (cIndex <= 1) 0 else scrollOffsetPx
+                        scrollJob?.cancel()
+                        scrollJob = coroutineScope.launch {
                             rowState.animateScrollToItem(targetIndex, offsetPx)
                         }
                     },

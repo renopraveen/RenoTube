@@ -552,7 +552,7 @@ class PlayerViewModel @Inject constructor(
         // Immediately stop previous video & Ambilight to free hardware decoders, CPU & network
         renoTubePlayer.stop()
         cpuAmbilightEngine.stop()
-        mediaRepository.isPlaybackActive = false
+        mediaRepository.isPlaybackActive = true // Prioritize network bandwidth strictly for primary video startup
         skippedSegmentKeys.clear()
 
         _uiState.update {

@@ -230,7 +230,7 @@ class RenoTubePlayer @Inject constructor(
         .setBufferDurationsMs(
             /* minBufferMs = */ 2_500,            // 2.5 s buffer for stable TV playback without underflows
             /* maxBufferMs = */ 25_000,           // Buffer up to 25 s ahead
-            /* bufferForPlaybackMs = */ 300,      // 300 ms instant playback threshold (first frame rendered in ~200-300ms)
+            /* bufferForPlaybackMs = */ 250,      // 250 ms instant playback threshold for rapid 1st frame rendering
             /* bufferForPlaybackAfterRebufferMs = */ 1_000  // 1 s recovery from stalls
         )
         .setTargetBufferBytes(32 * 1024 * 1024)  // 32 MB target: optimal for 1080p/4K on Android TV

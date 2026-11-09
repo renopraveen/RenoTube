@@ -211,7 +211,7 @@ open class BaseMediaItem : MediaItem {
     }
 
     override fun getAuthor(): String? {
-        return subTitle?.toString()
+        return userName ?: subTitle?.toString()
     }
 
     override fun getFeedbackToken(): String? {

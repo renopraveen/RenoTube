@@ -71,16 +71,25 @@ data class VideoCardModel(
                     if (t.isNotEmpty()) t else null
                 }
             } else emptyList()
-            val cleanAuthor = authorParts.firstOrNull { !it.startsWith("@") }
-                ?: authorParts.firstOrNull()
-                ?: ""
-
             val secondParts = if (!rawSecondTitle.isNullOrEmpty()) {
                 SPLIT_REGEX.split(rawSecondTitle).mapNotNull {
                     val t = it.trim()
                     if (t.isNotEmpty()) t else null
                 }
             } else emptyList()
+
+            val cleanAuthor = if (authorParts.isNotEmpty()) {
+                authorParts.firstOrNull { !it.startsWith("@") } ?: authorParts.firstOrNull() ?: ""
+            } else {
+                // When author is not provided separately (e.g. search items), extract from secondTitle
+                secondParts.firstOrNull { part ->
+                    !part.startsWith("@") &&
+                    !part.contains("view", ignoreCase = true) &&
+                    !part.contains("ago", ignoreCase = true) &&
+                    !part.contains("stream", ignoreCase = true) &&
+                    !part.all { it.isDigit() }
+                } ?: secondParts.firstOrNull() ?: ""
+            }
 
             val cleanSecondParts = ArrayList<String>(secondParts.size)
             val authorNorm = cleanAuthor.replace(" ", "").lowercase()
