@@ -120,16 +120,7 @@ fun VideoCard(
         }
     }
 
-    // Restore focus to this card when returning from the player (isLastFocused = true means this was the last card clicked)
-    LaunchedEffect(isLastFocused) {
-        if (isLastFocused) {
-            // Small delay to let the LazyRow/LazyColumn fully settle before requesting focus
-            kotlinx.coroutines.delay(150)
-            try {
-                effectiveFocusRequester.requestFocus()
-            } catch (_: Exception) {}
-        }
-    }
+    // Card focus is naturally managed by Compose 2D spatial navigation matching YouTube TV
 
     Column(
         modifier = modifier

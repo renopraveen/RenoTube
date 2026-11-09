@@ -121,7 +121,7 @@ class CpuAmbilightEngine(
         }
     }
 
-    fun start(mainPlayer: ExoPlayer, lowResVideoUrl: String) {
+    fun start(mainPlayer: ExoPlayer, lowResVideoUrl: String, clientUserAgent: String? = null) {
         if (cpuPlayer != null && currentUrl == lowResVideoUrl && attachedMainPlayer == mainPlayer) {
             return
         }
@@ -169,9 +169,10 @@ class CpuAmbilightEngine(
             .setBackBuffer(10_000, false)
             .build()
 
-        val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        val effectiveUa = clientUserAgent?.takeIf { it.isNotEmpty() }
+            ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         val httpFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
-            .setUserAgent(userAgent)
+            .setUserAgent(effectiveUa)
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(8_000)
             .setReadTimeoutMs(10_000)
@@ -190,6 +191,12 @@ class CpuAmbilightEngine(
                     .buildUpon()
                     .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
                     .build()
+                addListener(object : Player.Listener {
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        android.util.Log.w("CpuAmbilightEngine", "Ambilight video decoder stopped: ${error.errorCodeName}")
+                        stop()
+                    }
+                })
                 setVideoSurface(imageReader!!.surface)
                 setMediaSource(mediaSource)
                 prepare()

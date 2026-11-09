@@ -120,7 +120,7 @@ class RenoTubePlayer @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     private val bandwidthMeter = DefaultBandwidthMeter.Builder(context)
-        .setInitialBitrateEstimate(2_500_000L) // Fast startup: 2.5 Mbps renders 1st frame in ~200ms at 720p/1080p, then ramps up to 4K
+        .setInitialBitrateEstimate(50_000_000L) // Fast 4K TV startup: 50 Mbps ensures immediate 4K/1080p selection on 1st frame
         .build()
 
     val hardware4kCodecSelector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
@@ -249,6 +249,7 @@ class RenoTubePlayer @Inject constructor(
                     MimeTypes.VIDEO_AV1,
                     MimeTypes.VIDEO_H264
                 )
+                .setForceHighestSupportedBitrate(true) // Prefer highest available bitrate on 4K TV
                 .setTunnelingEnabled(false)
                 .setPreferredAudioLanguage("en") // English audio is always preferred by default
                 .setPreferredTextLanguage("en")
@@ -441,52 +442,136 @@ class RenoTubePlayer @Inject constructor(
         applyOptimalResolution()
     }
 
-    private fun applyOptimalResolution() {
-        val manual = manualResolutionHeight
-        if (manual != null) {
-            applyConstrainedResolution(manual)
-            return
-        }
-
-        // Native Performance (SurfaceView): Unconstrained 4K UHD @ 60fps HDR
-        trackSelector.setParameters(
-            trackSelector.buildUponParameters()
-                .clearVideoSizeConstraints()
-                .setMaxVideoSize(4096, 2160) // Unconstrained DCI 4K (4096x2160) & 4K UHD (3840x2160)
-                .setTunnelingEnabled(false)
-                .setPreferredVideoMimeTypes(
-                    MimeTypes.VIDEO_VP9,     // Prefer VP9 over AV1 for 4K60 lower latency hardware decoding
-                    MimeTypes.VIDEO_H265,
-                    MimeTypes.VIDEO_H264
-                )
-        )
-        Log.i(TAG, "Native 4K Performance: Unconstrained 4K UHD @ 60fps (VP9 preferred) on SurfaceView (tunneling=false)")
-    }
-
     fun setMaxVideoResolution(height: Int) {
-        manualResolutionHeight = if (height >= 2160) null else height
-        if (height >= 2160) {
-            applyOptimalResolution()
-        } else {
-            applyConstrainedResolution(height)
+        manualResolutionHeight = height
+        applyVideoResolution(height)
+    }
+
+    fun getMaxAvailableVideoHeight(): Int {
+        val tracks = exoPlayer.currentTracks
+        val videoGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
+        var maxH = 0
+        for (g in videoGroups) {
+            for (i in 0 until g.mediaTrackGroup.length) {
+                val f = g.mediaTrackGroup.getFormat(i)
+                val tier = if (f.width >= f.height) maxOf(f.height, (f.width * 9 + 8) / 16) else minOf(f.width, f.height)
+                if (tier > maxH) maxH = tier
+            }
+        }
+        return maxH
+    }
+
+    fun applyVideoResolution(targetHeight: Int?) {
+        try {
+            val tracks = exoPlayer.currentTracks
+            // Search across ALL video track groups (both MP4 and WebM/VP9 AdaptationSets)
+            val videoGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
+
+            if (videoGroups.isNotEmpty() && targetHeight != null) {
+                var bestGroup: androidx.media3.common.Tracks.Group? = null
+                var bestTrackIndex = -1
+                var bestScore = -1.0
+
+                for (group in videoGroups) {
+                    val mediaTrackGroup = group.mediaTrackGroup
+                    for (i in 0 until mediaTrackGroup.length) {
+                        val format = mediaTrackGroup.getFormat(i)
+                        // Compute effective vertical resolution tier, properly handling 16:9,
+                        // cinematic widescreen (2.39:1 / 21:9), and vertical formats
+                        val effectiveTier = if (format.width >= format.height) {
+                            maxOf(format.height, (format.width * 9 + 8) / 16)
+                        } else {
+                            minOf(format.width, format.height)
+                        }
+
+                        // Prefer VP9/AV1 hardware decoded tracks
+                        val isPreferredCodec = format.sampleMimeType == MimeTypes.VIDEO_VP9 || format.sampleMimeType == MimeTypes.VIDEO_AV1
+                        val codecBonus = if (isPreferredCodec) 500_000.0 else 0.0
+
+                        if (targetHeight >= 2160) {
+                            // User wants 4K UHD / highest available quality: pick highest resolution tier & bitrate
+                            val score = effectiveTier.toDouble() * 100_000_000.0 + format.bitrate.toDouble() + codecBonus
+                            if (score > bestScore) {
+                                bestScore = score
+                                bestTrackIndex = i
+                                bestGroup = group
+                            }
+                        } else {
+                            // Match specific resolution tier (1440p, 1080p, 720p, 480p)
+                            if (effectiveTier <= targetHeight + 50) {
+                                val score = effectiveTier.toDouble() * 100_000_000.0 + format.bitrate.toDouble() + codecBonus
+                                if (score > bestScore) {
+                                    bestScore = score
+                                    bestTrackIndex = i
+                                    bestGroup = group
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fallback to closest track across all groups if no track was strictly <= targetHeight
+                if (bestTrackIndex < 0) {
+                    var minDiff = Int.MAX_VALUE
+                    for (group in videoGroups) {
+                        val mediaTrackGroup = group.mediaTrackGroup
+                        for (i in 0 until mediaTrackGroup.length) {
+                            val format = mediaTrackGroup.getFormat(i)
+                            val effectiveTier = if (format.width >= format.height) {
+                                maxOf(format.height, (format.width * 9 + 8) / 16)
+                            } else {
+                                minOf(format.width, format.height)
+                            }
+                            val diff = kotlin.math.abs(effectiveTier - targetHeight)
+                            if (diff < minDiff) {
+                                minDiff = diff
+                                bestTrackIndex = i
+                                bestGroup = group
+                            }
+                        }
+                    }
+                }
+
+                if (bestGroup != null && bestTrackIndex >= 0) {
+                    val override = TrackSelectionOverride(bestGroup.mediaTrackGroup, listOf(bestTrackIndex))
+                    trackSelector.setParameters(
+                        trackSelector.buildUponParameters()
+                            .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+                            .addOverride(override)
+                            .clearVideoSizeConstraints()
+                            .setForceHighestSupportedBitrate(targetHeight >= 2160)
+                            .setTunnelingEnabled(false)
+                    )
+                    val selectedFormat = bestGroup.mediaTrackGroup.getFormat(bestTrackIndex)
+                    Log.i(TAG, "Video resolution LOCKED via TrackSelectionOverride to ${selectedFormat.sampleMimeType} track $bestTrackIndex: ${selectedFormat.width}x${selectedFormat.height} @ ${selectedFormat.frameRate}fps (target: ${targetHeight}p)")
+                    return
+                }
+            }
+
+            // Default / Auto (no override): Unconstrained 4K UHD @ 60fps HDR
+            trackSelector.setParameters(
+                trackSelector.buildUponParameters()
+                    .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+                    .clearVideoSizeConstraints()
+                    .setMaxVideoSize(4096, 2160)
+                    .setMaxVideoFrameRate(60)
+                    .setForceHighestSupportedBitrate(true)
+                    .setTunnelingEnabled(false)
+                    .setPreferredVideoMimeTypes(
+                        MimeTypes.VIDEO_VP9,
+                        MimeTypes.VIDEO_H265,
+                        MimeTypes.VIDEO_AV1,
+                        MimeTypes.VIDEO_H264
+                    )
+            )
+            Log.i(TAG, "Native 4K Performance: Unconstrained 4K UHD @ 60fps (forceHighestSupportedBitrate=true, tunneling=false)")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error applying video resolution: ${e.message}")
         }
     }
 
-    private fun applyConstrainedResolution(height: Int) {
-        val width = when (height) {
-            1440 -> 2560
-            1080 -> 1920
-            720 -> 1280
-            480 -> 854
-            else -> 1920
-        }
-        trackSelector.setParameters(
-            trackSelector.buildUponParameters()
-                .setMaxVideoSize(width, height)
-                .setMinVideoSize(width, height)
-                .setTunnelingEnabled(false)
-        )
-        Log.i(TAG, "Video resolution constrained and locked to ${width}x${height} (tunneling=false)")
+    private fun applyOptimalResolution() {
+        applyVideoResolution(manualResolutionHeight)
     }
 
     // ── Voice Clarity / Dialogue Boost Mode (+6dB vocal compression) ──
@@ -630,6 +715,9 @@ class RenoTubePlayer @Inject constructor(
             }
 
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                if (manualResolutionHeight != null) {
+                    applyVideoResolution(manualResolutionHeight)
+                }
                 for (group in tracks.groups) {
                     if (group.type == C.TRACK_TYPE_VIDEO && group.isSelected) {
                         for (i in 0 until group.length) {
@@ -817,6 +905,7 @@ class RenoTubePlayer @Inject constructor(
                     .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
                     .setPreferredAudioLanguage(preferredAudioLanguage.ifBlank { "en" })
             )
+            applyVideoResolution(manualResolutionHeight)
 
             if (mpdReady) {
                 try {
@@ -870,16 +959,45 @@ class RenoTubePlayer @Inject constructor(
     }
 
     /**
+     * High-Resolution HLS fallback when DASH encounters an error (e.g. 403 at 60s).
+     * Maintains full 4K UHD / 1080p quality without falling to progressive SD.
+     */
+    fun playHlsFallback(formatInfo: MediaItemFormatInfo?, startPositionMs: Long = 0L): Boolean {
+        if (formatInfo == null) return false
+        val hlsUrl = if (formatInfo.containsHlsUrl()) formatInfo.hlsManifestUrl else null
+        if (hlsUrl.isNullOrEmpty()) return false
+
+        Log.w(TAG, "DASH stream error. Falling back immediately to High-Res HLS stream: $hlsUrl at ${startPositionMs}ms")
+        val dataSourceFactory = createDataSourceFactory(formatInfo)
+        val subtitleConfigs = buildSubtitleConfigurations(formatInfo)
+        val mediaItem = Media3MediaItem.Builder()
+            .setUri(hlsUrl)
+            .setSubtitleConfigurations(subtitleConfigs)
+            .build()
+        val mediaSource = HlsMediaSource.Factory(dataSourceFactory)
+            .setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy())
+            .createMediaSource(mediaItem)
+        exoPlayer.stop()
+        exoPlayer.setMediaSource(mediaSource)
+        if (startPositionMs > 0) {
+            exoPlayer.seekTo(startPositionMs)
+        }
+        exoPlayer.prepare()
+        exoPlayer.playWhenReady = true
+        return true
+    }
+
+    /**
      * Immediate Progressive MP4 fallback when DASH encounters a Source Error (e.g. 403 / XML / timeout)
      */
-    fun playProgressiveFallback(formatInfo: MediaItemFormatInfo?): Boolean {
+    fun playProgressiveFallback(formatInfo: MediaItemFormatInfo?, startPositionMs: Long = 0L): Boolean {
         if (formatInfo == null) return false
         val urls = formatInfo.createUrlList()?.filter { it.isNotEmpty() }
         val progressiveUrl = urls?.firstOrNull()
         if (progressiveUrl.isNullOrEmpty()) {
             return false
         }
-        Log.w(TAG, "DASH stream failed. Falling back to Progressive MP4 stream: $progressiveUrl")
+        Log.w(TAG, "All high-res streams failed. Falling back to Progressive MP4 stream: $progressiveUrl at ${startPositionMs}ms")
         val dataSourceFactory = createDataSourceFactory(formatInfo)
         val subtitleConfigs = buildSubtitleConfigurations(formatInfo)
         val mediaItem = Media3MediaItem.Builder()
@@ -887,7 +1005,11 @@ class RenoTubePlayer @Inject constructor(
             .setSubtitleConfigurations(subtitleConfigs)
             .build()
         val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+        exoPlayer.stop()
         exoPlayer.setMediaSource(mediaSource)
+        if (startPositionMs > 0) {
+            exoPlayer.seekTo(startPositionMs)
+        }
         exoPlayer.prepare()
         exoPlayer.playWhenReady = true
         return true

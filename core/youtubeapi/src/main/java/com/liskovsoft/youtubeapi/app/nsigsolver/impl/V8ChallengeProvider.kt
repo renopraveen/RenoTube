@@ -82,8 +82,17 @@ internal object V8ChallengeProvider: JsRuntimeChalBaseJCP() {
         v8Executor.submit {
             try {
                 initRuntime()
+                // Warm up player preprocessor on background worker thread
+                val defaultPlayerUrl = com.liskovsoft.youtubeapi.common.helpers.AppConstants.playerUrls.firstOrNull()
+                if (defaultPlayerUrl != null) {
+                    val dummyN = "5cNpZqIJ7ixNqU68Y7S"
+                    bulkSolve(listOf(com.liskovsoft.youtubeapi.app.nsigsolver.provider.JsChallengeRequest(
+                        com.liskovsoft.youtubeapi.app.nsigsolver.provider.JsChallengeType.N,
+                        com.liskovsoft.youtubeapi.app.nsigsolver.provider.ChallengeInput(defaultPlayerUrl, listOf(dummyN))
+                    ))).toList()
+                }
             } catch (e: Throwable) {
-                disposeRuntime()
+                // Background warmup best-effort
             }
         }
     }

@@ -89,7 +89,9 @@ internal class WebPlayerDataExtractor(override val playerUrl: String): PlayerDat
         if (Helpers.allNulls(nParams, sParams)) {
             return Pair(null, null)
         }
-        checkSigData()
+        val hasN = !Helpers.allNulls(nParams)
+        val hasSig = !Helpers.allNulls(sParams)
+        checkSigData(hasN, hasSig)
 
         var nProcessed: List<String?>? = null
         var sProcessed: List<String?>? = null
@@ -102,15 +104,21 @@ internal class WebPlayerDataExtractor(override val playerUrl: String): PlayerDat
             JsChallengeRequest(JsChallengeType.SIG, ChallengeInput(fixedPlayerUrl, it))
         }
 
-        val result = V8ChallengeProvider.bulkSolve(listOfNotNull(nRequest, sRequest))
+        val requests = listOfNotNull(nRequest, sRequest)
+        if (requests.isNotEmpty()) {
+            val result = V8ChallengeProvider.bulkSolve(requests)
 
-        for (item in result) {
-            when (item.response?.type) {
-                JsChallengeType.N ->
-                    nProcessed = nParams?.map { item.response.output.results[it] }
-                JsChallengeType.SIG ->
-                    sProcessed = sParams?.map { item.response.output.results[it] }
-                else -> {}
+            for (item in result) {
+                if (item.error != null) {
+                    android.util.Log.e(tag, "V8 Challenge Solver Error: ${item.error.message}")
+                }
+                when (item.response?.type) {
+                    JsChallengeType.N ->
+                        nProcessed = nParams?.map { item.response.output.results[it] }
+                    JsChallengeType.SIG ->
+                        sProcessed = sParams?.map { item.response.output.results[it] }
+                    else -> {}
+                }
             }
         }
 
@@ -157,33 +165,45 @@ internal class WebPlayerDataExtractor(override val playerUrl: String): PlayerDat
         }
     }
 
-    private fun checkSigData() {
-        if (nFuncCode && sFuncCode) {
+    private fun checkSigData(needN: Boolean = true, needSig: Boolean = false) {
+        if ((!needN || nFuncCode) && (!needSig || sFuncCode)) {
             return
         }
 
-        try {
-            val nParam = "5cNpZqIJ7ixNqU68Y7S"
-            val sigParam = "NJAJEij0EwRgIhAI0KExTgjfPk-MPM9MAdzyyPRt=BM8-XO5tm5hlMCSVpAiEAv7eP3CURqZNSPow8BXXAoazVoXgeMP7gH9BdylHCwgw=gwzz"
-            val result = V8ChallengeProvider.bulkSolve(
-                listOf(
-                    JsChallengeRequest(JsChallengeType.N, ChallengeInput(fixedPlayerUrl, listOf(nParam))),
-                    JsChallengeRequest(JsChallengeType.SIG, ChallengeInput(fixedPlayerUrl, listOf(sigParam))),
-                ))
+        if (needN && !nFuncCode) {
+            try {
+                val nParam = "5cNpZqIJ7ixNqU68Y7S"
+                val result = V8ChallengeProvider.bulkSolve(
+                    listOf(JsChallengeRequest(JsChallengeType.N, ChallengeInput(fixedPlayerUrl, listOf(nParam))))
+                )
 
-            for (item in result) {
-                when (item.response?.type) {
-                    JsChallengeType.N ->
-                        if (item.response.output.results[nParam]?.let { it != nParam } ?: false)
-                            nFuncCode = true
-                    JsChallengeType.SIG ->
-                        if (item.response.output.results[sigParam]?.let { it != sigParam } ?: false)
-                            sFuncCode = true
-                    else -> {}
+                for (item in result) {
+                    if (item.response?.type == JsChallengeType.N &&
+                        item.response.output.results[nParam]?.let { it != nParam } == true) {
+                        nFuncCode = true
+                    }
                 }
+            } catch (e: Exception) {
+                // Ignore failure
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        }
+
+        if (needSig && !sFuncCode) {
+            try {
+                val sigParam = "NJAJEij0EwRgIhAI0KExTgjfPk-MPM9MAdzyyPRt=BM8-XO5tm5hlMCSVpAiEAv7eP3CURqZNSPow8BXXAoazVoXgeMP7gH9BdylHCwgw=gwzz"
+                val result = V8ChallengeProvider.bulkSolve(
+                    listOf(JsChallengeRequest(JsChallengeType.SIG, ChallengeInput(fixedPlayerUrl, listOf(sigParam))))
+                )
+
+                for (item in result) {
+                    if (item.response?.type == JsChallengeType.SIG &&
+                        item.response.output.results[sigParam]?.let { it != sigParam } == true) {
+                        sFuncCode = true
+                    }
+                }
+            } catch (e: Exception) {
+                // TV player does not have sig function; ignore
+            }
         }
     }
 }

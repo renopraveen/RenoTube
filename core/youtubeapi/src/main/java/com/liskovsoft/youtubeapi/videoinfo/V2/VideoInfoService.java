@@ -32,15 +32,14 @@ public class VideoInfoService extends VideoInfoServiceBase {
     // Prioritize fast unthrottled clients without BotGuard WebView delay or unplayable errors
     private final static AppClient[] VIDEO_INFO_TYPE_LIST = {
             AppClient.ANDROID_VR,    // Direct Quest 3 client: Status=OK, 26 adaptive streams with direct URLs up to 4K, zero BotGuard, zero cipher
-            AppClient.TV_DOWNGRADED, // Official SmartTube Cobalt TV client: Direct 4K DASH streams with zero TCL delay
-            AppClient.ANDROID,       // Direct Android mobile client: Status=OK, 29 streams + progressive MP4
+            AppClient.IOS,           // Official iOS client: 4K UHD/1080p HLS streams, unblocked on music & copyrighted content
             AppClient.VISIONOS,      // Direct VisionOS format: 4K/1080p HLS and adaptive DASH
             AppClient.WEB_SAFARI,    // Direct fast Safari format
-            AppClient.IOS,           // Direct Apple HLS streams (works on licensed music videos)
+            AppClient.TV,            // TV client with auth
+            AppClient.ANDROID,       // Direct Android mobile client: Status=OK, 29 streams + progressive MP4
             AppClient.MWEB,          // Lightweight mobile web format
             AppClient.WEB,           // Web client fallback
-            AppClient.GEO,           // Geoblock bypass
-            AppClient.TV             // TV client with auth
+            AppClient.GEO            // Geoblock bypass
     };
     @Nullable
     private AppClient mActualInfoType = null;

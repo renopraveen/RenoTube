@@ -60,8 +60,10 @@ internal abstract class JsRuntimeChalBaseJCP: JsChallengeProvider() {
                 throw JsChallengeProviderError("Cannot parse solver output", e)
             }
 
-            if (output.type == "error")
+            if (output.type == "error") {
+                ie.cache.clear(cacheSection)
                 throw JsChallengeProviderError(output.error ?: "Unknown solver output error")
+            }
 
             val preprocessed = output.preprocessed_player
             if (preprocessed != null)
@@ -69,6 +71,7 @@ internal abstract class JsRuntimeChalBaseJCP: JsChallengeProvider() {
 
             for ((request, responseData) in groupedRequests.zip(output.responses)) {
                 if (responseData.type == "error") {
+                    ie.cache.clear(cacheSection)
                     yield(JsChallengeProviderResponse(
                         request, null, JsChallengeProviderError(responseData.error ?: "Unknown solver output error")))
                 } else {

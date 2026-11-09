@@ -36,6 +36,11 @@ class MediaRepository @Inject constructor(
      */
     fun extractLowResVideoStreamUrl(formatInfo: MediaItemFormatInfo?): String? {
         if (formatInfo == null) return null
+
+        // 0. Prefer true progressive MP4 stream (itag 18/22) for ProgressiveMediaSource
+        val progressive = formatInfo.createUrlList()?.firstOrNull { it.isNotEmpty() }
+        if (!progressive.isNullOrEmpty()) return progressive
+
         val formats = formatInfo.adaptiveFormats ?: return null
 
         // 1. Prefer 144p H.264 (itag 160)

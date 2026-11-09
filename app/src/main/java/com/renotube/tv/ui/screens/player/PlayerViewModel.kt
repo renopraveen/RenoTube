@@ -71,6 +71,7 @@ class PlayerViewModel @Inject constructor(
         private set
     private var loadVideoJob: kotlinx.coroutines.Job? = null
     private var currentPlaybackRetryCount: Int = 0
+    private var hasAttemptedHlsFallback: Boolean = false
     private var hasAttemptedProgressiveFallback: Boolean = false
 
     val remoteActionFlow = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 1)
@@ -340,7 +341,8 @@ class PlayerViewModel @Inject constructor(
                 } else if (_uiState.value.isPlaying) {
                     val url = currentLowResUrl ?: mediaRepository.ambilightLowResUrl
                     if (!url.isNullOrBlank()) {
-                        cpuAmbilightEngine.start(renoTubePlayer.exoPlayer, url)
+                        val ua = currentFormatInfo?.clientInfo?.userAgent
+                        cpuAmbilightEngine.start(renoTubePlayer.exoPlayer, url, ua)
                     }
                 }
             }
@@ -351,34 +353,48 @@ class PlayerViewModel @Inject constructor(
             Log.w(TAG, "Playback error caught in ViewModel: ${error.message} (${error.errorCodeName}). Attempting automatic recovery...")
             val currentId = _uiState.value.videoId
             if (currentId.isNotEmpty()) {
+                val savedPos = renoTubePlayer.currentPositionMs
                 viewModelScope.launch {
                     mediaRepository.invalidateFormat(currentId)
 
-                    // 1. YouTube TV Fallback: Try Progressive MP4 fallback only once per video
-                    if (!hasAttemptedProgressiveFallback && currentFormatInfo != null) {
-                        hasAttemptedProgressiveFallback = true
-                        if (renoTubePlayer.playProgressiveFallback(currentFormatInfo)) {
-                            Log.i(TAG, "Attempting Progressive MP4 fallback for $currentId")
+                    // 1. Instant In-Memory High-Res HLS Fallback:
+                    // If current format contains an HLS manifest, switch to HLS immediately (0ms network request)
+                    // maintaining full 4K / 1080p quality and resuming at the exact second
+                    if (!hasAttemptedHlsFallback && currentFormatInfo != null) {
+                        hasAttemptedHlsFallback = true
+                        if (renoTubePlayer.playHlsFallback(currentFormatInfo, startPositionMs = savedPos)) {
+                            Log.i(TAG, "Successfully failed over to High-Res HLS stream for $currentId at ${savedPos}ms")
                             _uiState.update { it.copy(isLoading = false, errorMessage = null) }
                             return@launch
                         }
                     }
 
-                    // 2. Format / Client failover: Switch to next client format and retry
-                    if (currentPlaybackRetryCount < 3) {
+                    // 2. High-Res Client Format failover: Try switching to next high-res client (IOS -> VISIONOS -> WEB_SAFARI)
+                    if (currentPlaybackRetryCount < 2) {
                         currentPlaybackRetryCount++
-                        Log.i(TAG, "Switching to next format client (attempt $currentPlaybackRetryCount) for $currentId")
+                        Log.i(TAG, "Switching to next format client (attempt $currentPlaybackRetryCount) for $currentId at ${savedPos}ms")
                         mediaRepository.switchNextFormat(force = true)
                         delay(200)
-                        loadVideo(currentId, retryCount = currentPlaybackRetryCount)
-                    } else {
-                        mediaRepository.resetClientToDefault()
-                        _uiState.update {
-                            it.copy(
-                                isLoading = false,
-                                errorMessage = "Playback error: ${error.message ?: "Unable to play stream"}"
-                            )
+                        loadVideo(currentId, retryCount = currentPlaybackRetryCount, startPositionMs = savedPos)
+                        return@launch
+                    }
+
+                    // 3. Progressive fallback: ONLY as a last resort if all high-res DASH and HLS attempts fail
+                    if (!hasAttemptedProgressiveFallback && currentFormatInfo != null) {
+                        hasAttemptedProgressiveFallback = true
+                        if (renoTubePlayer.playProgressiveFallback(currentFormatInfo, startPositionMs = savedPos)) {
+                            Log.w(TAG, "All high-res streams failed; falling back to Progressive stream as last resort for $currentId at ${savedPos}ms")
+                            _uiState.update { it.copy(isLoading = false, errorMessage = null) }
+                            return@launch
                         }
+                    }
+
+                    mediaRepository.resetClientToDefault()
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            errorMessage = "Playback error: ${error.message ?: "Unable to play stream"}"
+                        )
                     }
                 }
             }
@@ -504,14 +520,16 @@ class PlayerViewModel @Inject constructor(
         author: String = "",
         thumbnailUrl: String = "",
         clickTrackingParams: String? = null,
-        retryCount: Int = 0
+        retryCount: Int = 0,
+        startPositionMs: Long = 0L
     ) {
         if (videoId.isBlank()) return
 
-        Log.i(TAG, "Loading video: $videoId (attempt $retryCount)")
+        Log.i(TAG, "Loading video: $videoId (attempt $retryCount, startPos=${startPositionMs}ms)")
 
         currentPlaybackRetryCount = retryCount
         if (retryCount == 0) {
+            hasAttemptedHlsFallback = false
             hasAttemptedProgressiveFallback = false
         } else {
             mediaRepository.invalidateFormat(videoId)
@@ -572,6 +590,9 @@ class PlayerViewModel @Inject constructor(
                 // 2. Start ExoPlayer playback IMMEDIATELY
                 val playSuccess = renoTubePlayer.playFormatInfo(formatInfo)
                 if (playSuccess) {
+                    if (startPositionMs > 0) {
+                        renoTubePlayer.seekTo(startPositionMs)
+                    }
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -582,7 +603,8 @@ class PlayerViewModel @Inject constructor(
                         viewModelScope.launch {
                             kotlinx.coroutines.delay(800) // Give main 4K player 800ms uninterrupted CPU & Wi-Fi priority to render 1st frame instantly
                             if (renoTubePlayer.isPlaying || _uiState.value.isFirstFrameRendered) {
-                                cpuAmbilightEngine.start(renoTubePlayer.exoPlayer, lowResUrl)
+                                val ua = currentFormatInfo?.clientInfo?.userAgent
+                                cpuAmbilightEngine.start(renoTubePlayer.exoPlayer, lowResUrl, ua)
                             }
                         }
                     }
@@ -791,6 +813,19 @@ class PlayerViewModel @Inject constructor(
 
     fun setMaxVideoResolution(height: Int) {
         renoTubePlayer.setMaxVideoResolution(height)
+        val maxAvailable = renoTubePlayer.getMaxAvailableVideoHeight()
+        if (height >= 720 && maxAvailable in 1..480) {
+            val currentId = _uiState.value.videoId
+            if (currentId.isNotEmpty()) {
+                val savedPos = renoTubePlayer.currentPositionMs
+                Log.i(TAG, "Upgrading stream format from ${maxAvailable}p to HD (${height}p) for $currentId at ${savedPos}ms")
+                viewModelScope.launch {
+                    mediaRepository.invalidateFormat(currentId)
+                    mediaRepository.resetClientToDefault()
+                    loadVideo(currentId, retryCount = 0, startPositionMs = savedPos)
+                }
+            }
+        }
     }
 
     private val _voiceClarityEnabled = MutableStateFlow(renoTubePlayer.isVoiceBoostEnabled())

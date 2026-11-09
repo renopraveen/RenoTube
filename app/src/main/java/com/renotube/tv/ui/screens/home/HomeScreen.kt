@@ -78,6 +78,7 @@ fun HomeScreen(
     var toastMessage by remember { mutableStateOf<String?>(null) }
     var currentFocusedRowIndex by remember { mutableStateOf(viewModel.lastFocusedRowIndex) }
     val firstChipFocusRequester = remember { FocusRequester() }
+    var verticalScrollJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     // Restore scroll position to the last-focused row when returning from player
     LaunchedEffect(uiState.sections) {
@@ -165,10 +166,7 @@ fun HomeScreen(
                             viewModel.loadCategory(categoryId)
                         },
                         onNavigateToSidebar = onNavigateToSidebar,
-                        onDownPress = {
-                            currentFocusedRowIndex = 1
-                            coroutineScope.launch { homeListState.animateScrollToItem(1, 0) }
-                        },
+                        onDownPress = null,
                         firstChipFocusRequester = firstChipFocusRequester
                     )
                 }
@@ -189,8 +187,10 @@ fun HomeScreen(
                         onVideoFocused = { video ->
                             currentFocusedRowIndex = rowIndex + 1
                             viewModel.onCardFocusedWithRow(video, rowIndex + 1)
-                            coroutineScope.launch {
-                                homeListState.animateScrollToItem(rowIndex + 1)
+                            verticalScrollJob?.cancel()
+                            verticalScrollJob = coroutineScope.launch {
+                                val targetItem = if (rowIndex == 0) 0 else rowIndex + 1
+                                homeListState.animateScrollToItem(targetItem)
                             }
                         },
                         onNextVideoPrefetch = { nextVideo ->
@@ -199,13 +199,11 @@ fun HomeScreen(
                         onNavigateToSidebar = onNavigateToSidebar,
                         onUpPress = {
                             if (rowIndex == 0) {
-                                currentFocusedRowIndex = 0
-                                coroutineScope.launch { homeListState.animateScrollToItem(0, 0) }
-                                false // Allow focus to transition naturally to FilterChipsBar above
-                            } else {
                                 coroutineScope.launch {
-                                    homeListState.animateScrollToItem(rowIndex)
+                                    homeListState.animateScrollToItem(0)
                                 }
+                                false
+                            } else {
                                 false
                             }
                         },
@@ -213,13 +211,10 @@ fun HomeScreen(
                             if (rowIndex >= uiState.sections.lastIndex) {
                                 true // Clamp at bottom of feed: stay on this card, never jump to sidebar Settings!
                             } else {
-                                coroutineScope.launch {
-                                    homeListState.animateScrollToItem(rowIndex + 2)
-                                }
-                                false // Allow focus to transition naturally to next row below
+                                false
                             }
                         },
-                        focusedVideoId = viewModel.getRowFocusedVideoId(rowIndex + 1) ?: viewModel.lastFocusedVideoId
+                        focusedVideoId = null
                     )
                 }
             }

@@ -65,11 +65,21 @@ public abstract class VideoInfoServiceBase {
             }
         urlHolders.add(videoInfo.getUrlHolder());
 
+        long sigStart = System.currentTimeMillis();
         Pair<List<String>, List<String>> result = mAppService.bulkSigExtract(videoInfo.getClient(), extractNParams(urlHolders), extractSParams(urlHolders));
+        Log.d(TAG, "bulkSigExtract took " + (System.currentTimeMillis() - sigStart) + "ms for " + (videoInfo.getClient() != null ? videoInfo.getClient().name() : "null"));
 
         if (result != null) {
             List<String> nParams = result.getFirst();
             List<String> signatures = result.getSecond();
+
+            int solvedCount = 0;
+            if (nParams != null) {
+                for (String n : nParams) {
+                    if (n != null && !n.isEmpty()) solvedCount++;
+                }
+            }
+            Log.d(TAG, "bulkSigExtract: solved " + solvedCount + "/" + urlHolders.size() + " n-params for " + (videoInfo.getClient() != null ? videoInfo.getClient().name() : "null"));
 
             applyNParams(urlHolders, nParams);
             applySignatures(urlHolders, signatures);
@@ -124,7 +134,10 @@ public abstract class VideoInfoServiceBase {
         boolean sameSize = nParams.size() == urlHolders.size();
 
         for (int i = 0; i < urlHolders.size(); i++) {
-            urlHolders.get(i).setNParam(nParams.get(sameSize ? i : 0));
+            String solvedN = nParams.get(sameSize ? i : 0);
+            if (solvedN != null && !solvedN.isEmpty()) {
+                urlHolders.get(i).setNParam(solvedN);
+            }
         }
     }
 
