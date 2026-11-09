@@ -117,9 +117,9 @@ fun SearchScreen(
     LaunchedEffect(uiState.searchResults, uiState.isSearching) {
         if (uiState.searchResults.isNotEmpty() && !uiState.isSearching) {
             isKeyboardMinimized = true
-            // Pre-warm top 3 search results immediately for instant playback
+            // Pre-warm first search result immediately for instant playback
             val topResults = uiState.searchResults.firstOrNull()?.items?.take(3)
-            topResults?.forEach { viewModel.prefetchVideo(it.videoId) }
+            topResults?.firstOrNull()?.let { viewModel.prefetchVideo(it.videoId) }
             for (attempt in 1..4) {
                 kotlinx.coroutines.delay(80)
                 try {
@@ -389,9 +389,6 @@ fun SearchScreen(
                             onVideoLongClick = { selectedVideoForAction = it },
                             onVideoFocused = { cIndex, video ->
                                 viewModel.prefetchVideo(video.videoId)
-                                if (cIndex + 1 < section.items.size) {
-                                    viewModel.prefetchVideo(section.items[cIndex + 1].videoId)
-                                }
                                 isKeyboardMinimized = true
                                 coroutineScope.launch {
                                     searchListState.animateScrollToItem(rIndex)

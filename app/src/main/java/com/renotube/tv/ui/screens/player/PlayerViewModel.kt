@@ -40,6 +40,7 @@ data class PlayerUiState(
     val initialTitle: String = "",
     val initialAuthor: String = "",
     val initialThumbnail: String = "",
+    val isShorts: Boolean = false,
     val isFirstFrameRendered: Boolean = false,
     val isLoading: Boolean = true,
     val metadata: VideoPlaybackMetadata? = null,
@@ -115,7 +116,8 @@ class PlayerViewModel @Inject constructor(
                 title = queued.title,
                 author = queued.author,
                 thumbnailUrl = queued.thumbnailUrl,
-                clickTrackingParams = queued.clickTrackingParams
+                clickTrackingParams = queued.clickTrackingParams,
+                isShorts = queued.isShorts
             )
             return
         }
@@ -412,7 +414,7 @@ class PlayerViewModel @Inject constructor(
                 Log.w(TAG, "ExoPlayer reported STATE_ENDED prematurely at ${curPosMs}ms of ${durMs}ms. Recovering stream...")
                 val currentId = _uiState.value.videoId
                 if (currentId.isNotEmpty()) {
-                    loadVideo(currentId, retryCount = 1, startPositionMs = curPosMs)
+                    loadVideo(currentId, retryCount = 1, startPositionMs = curPosMs, isShorts = _uiState.value.isShorts)
                 }
             } else {
                 syncWatchHistoryToYouTube(durSec, durSec)
@@ -429,7 +431,8 @@ class PlayerViewModel @Inject constructor(
                             title = queued.title,
                             author = queued.author,
                             thumbnailUrl = queued.thumbnailUrl,
-                            clickTrackingParams = queued.clickTrackingParams
+                            clickTrackingParams = queued.clickTrackingParams,
+                            isShorts = queued.isShorts
                         )
                     } else {
                         val currentMeta = _uiState.value.metadata
@@ -441,7 +444,8 @@ class PlayerViewModel @Inject constructor(
                                 title = nextVideo.title,
                                 author = nextVideo.author,
                                 thumbnailUrl = nextVideo.thumbnailUrl,
-                                clickTrackingParams = nextVideo.clickTrackingParams
+                                clickTrackingParams = nextVideo.clickTrackingParams,
+                                isShorts = nextVideo.isShorts
                             )
                         }
                     }
@@ -534,7 +538,8 @@ class PlayerViewModel @Inject constructor(
         thumbnailUrl: String = "",
         clickTrackingParams: String? = null,
         retryCount: Int = 0,
-        startPositionMs: Long = 0L
+        startPositionMs: Long = 0L,
+        isShorts: Boolean = false
     ) {
         if (videoId.isBlank()) return
 
@@ -561,6 +566,7 @@ class PlayerViewModel @Inject constructor(
                 initialTitle = title,
                 initialAuthor = author,
                 initialThumbnail = thumbnailUrl,
+                isShorts = isShorts,
                 isFirstFrameRendered = false,
                 isLoading = true,
                 errorMessage = null
@@ -586,7 +592,8 @@ class PlayerViewModel @Inject constructor(
                             thumbnailUrl = thumbnailUrl,
                             clickTrackingParams = clickTrackingParams,
                             retryCount = retryCount + 1,
-                            startPositionMs = startPositionMs
+                            startPositionMs = startPositionMs,
+                            isShorts = isShorts
                         )
                         return@launch
                     } else {
@@ -633,7 +640,8 @@ class PlayerViewModel @Inject constructor(
                             thumbnailUrl = thumbnailUrl,
                             clickTrackingParams = clickTrackingParams,
                             retryCount = retryCount + 1,
-                            startPositionMs = startPositionMs
+                            startPositionMs = startPositionMs,
+                            isShorts = isShorts
                         )
                         return@launch
                     } else {

@@ -85,6 +85,7 @@ fun VideoCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     cardWidth: Dp = 296.dp,
+    isShorts: Boolean = false,
     onLongClick: (() -> Unit)? = null,
     onFocused: (() -> Unit)? = null,
     isLastFocused: Boolean = false,
@@ -250,11 +251,15 @@ fun VideoCard(
                 )
             }
     ) {
-        // 16:9 Thumbnail Container (12dp rounded corners matching official YouTube TV)
+        val effectiveIsShorts = isShorts || video.isShorts
+        val isShortsShelf = effectiveIsShorts && cardWidth < 220.dp
+        val thumbRatio = if (isShortsShelf) (9f / 16f) else (16f / 9f)
+
+        // Thumbnail Container: 9:16 for Shorts shelf, 16:9 for Standard Video
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(16f / 9f)
+                .aspectRatio(thumbRatio)
                 .clip(RoundedCornerShape(12.dp))
                 .border(
                     width = if (isFocused) 2.5.dp else 0.dp,
@@ -263,7 +268,6 @@ fun VideoCard(
                 )
                 .background(YouTubeSurface)
         ) {
-            // Base layer: Thumbnail is ALWAYS loaded and displayed with resilient fallback
             val videoId = video.videoId
             val mqFallback = if (videoId.isNotBlank()) "https://i.ytimg.com/vi/$videoId/mqdefault.jpg" else null
             val hqFallback = if (videoId.isNotBlank()) "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" else null
@@ -272,7 +276,7 @@ fun VideoCard(
             val imageRequest = remember(imageTargetUrl, videoId) {
                 coil.request.ImageRequest.Builder(context)
                     .data(imageTargetUrl)
-                    .size(520, 293)
+                    .size(if (isShortsShelf) 360 else 520, if (isShortsShelf) 640 else 293)
                     .precision(coil.size.Precision.EXACT)
                     .crossfade(100)
                     .build()
@@ -280,7 +284,8 @@ fun VideoCard(
             coil.compose.AsyncImage(
                 model = imageRequest,
                 contentDescription = video.title,
-                contentScale = ContentScale.Crop,
+                contentScale = if (!isShortsShelf && effectiveIsShorts) ContentScale.Fit else ContentScale.Crop,
+                alignment = Alignment.Center,
                 modifier = Modifier.fillMaxSize()
             )
 
@@ -300,10 +305,26 @@ fun VideoCard(
                         fontWeight = FontWeight.Bold
                     )
                 }
+            } else if (effectiveIsShorts) {
+                // Official Red Shorts Badge
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(8.dp)
+                        .background(YouTubeRed, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = "SHORTS",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
 
             // Duration Pill (Official YouTube TV rounded pill)
-            if (!video.isLive && video.durationText.isNotEmpty()) {
+            if (!video.isLive && video.durationText.isNotEmpty() && !effectiveIsShorts) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
@@ -323,9 +344,9 @@ fun VideoCard(
             // Watch Progress Bar
             if (video.percentWatched > 0) {
                 LinearProgressIndicator(
-                    progress = video.percentWatched / 100f,
+                    progress = { video.percentWatched / 100f },
                     color = YouTubeRed,
-                    trackColor = Color(0x66FFFFFF),
+                    trackColor = Color.Transparent,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
@@ -336,67 +357,98 @@ fun VideoCard(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Official YouTube TV Metadata Layout: Channel Avatar Circle + Title & Channel Details
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.Top
-        ) {
-            // Channel Avatar Circle (Author initial / avatar)
-            val authorInitial = video.author.trim().firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "Y"
-            Box(
-                modifier = Modifier
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(if (isFocused) YouTubeRed else Color(0xFF2C2C2C)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = authorInitial,
-                    color = YouTubeWhite,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center
-                )
-            }
-
-            // Title & De-duplicated Details
+        if (isShortsShelf) {
             Column(
-                modifier = Modifier.weight(1f)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp)
             ) {
-                // Title (Exactly 2 lines for uniform card height & identical metadata baseline)
                 Text(
                     text = video.title,
                     minLines = 2,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     color = if (isFocused) YouTubeWhite else YouTubeWhite.copy(alpha = 0.90f),
-                    fontSize = 14.5.sp,
+                    fontSize = 13.sp,
                     fontWeight = if (isFocused) FontWeight.Bold else FontWeight.SemiBold,
-                    lineHeight = 19.sp
+                    lineHeight = 17.sp
                 )
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                val metadataLine = remember(video.author, video.secondTitle) {
-                    val (cleanAuth, cleanSec) = VideoCardModel.cleanAuthorAndDetails(video.author, video.secondTitle)
-                    when {
-                        cleanAuth.isNotEmpty() && cleanSec.isNotEmpty() -> "$cleanAuth • $cleanSec"
-                        cleanAuth.isNotEmpty() -> cleanAuth
-                        cleanSec.isNotEmpty() -> cleanSec
-                        else -> ""
-                    }
-                }
-
-                if (metadataLine.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                val authorClean = video.author.takeIf { it.isNotBlank() } ?: ""
+                if (authorClean.isNotEmpty()) {
                     Text(
-                        text = metadataLine,
+                        text = authorClean,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         color = if (isFocused) YouTubeWhite.copy(alpha = 0.85f) else YouTubeSecondaryText,
-                        fontSize = 12.5.sp,
+                        fontSize = 11.5.sp,
                         fontWeight = FontWeight.Normal
                     )
+                }
+            }
+        } else {
+            // Official YouTube TV Metadata Layout: Channel Avatar Circle + Title & Channel Details
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                // Channel Avatar Circle (Author initial / avatar)
+                val authorInitial = video.author.trim().firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "Y"
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(if (isFocused) YouTubeRed else Color(0xFF2C2C2C)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = authorInitial,
+                        color = YouTubeWhite,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                // Title & De-duplicated Details
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
+                    // Title (Exactly 2 lines for uniform card height & identical metadata baseline)
+                    Text(
+                        text = video.title,
+                        minLines = 2,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        color = if (isFocused) YouTubeWhite else YouTubeWhite.copy(alpha = 0.90f),
+                        fontSize = 14.5.sp,
+                        fontWeight = if (isFocused) FontWeight.Bold else FontWeight.SemiBold,
+                        lineHeight = 19.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    val metadataLine = remember(video.author, video.secondTitle) {
+                        val (cleanAuth, cleanSec) = VideoCardModel.cleanAuthorAndDetails(video.author, video.secondTitle)
+                        when {
+                            cleanAuth.isNotEmpty() && cleanSec.isNotEmpty() -> "$cleanAuth • $cleanSec"
+                            cleanAuth.isNotEmpty() -> cleanAuth
+                            cleanSec.isNotEmpty() -> cleanSec
+                            else -> ""
+                        }
+                    }
+
+                    if (metadataLine.isNotEmpty()) {
+                        Text(
+                            text = metadataLine,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = if (isFocused) YouTubeWhite.copy(alpha = 0.85f) else YouTubeSecondaryText,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Normal
+                        )
+                    }
                 }
             }
         }

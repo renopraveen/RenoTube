@@ -556,7 +556,8 @@ fun MainTvShell(
                         title = video.title,
                         author = video.author,
                         thumbnailUrl = video.thumbnailUrl,
-                        clickTrackingParams = video.clickTrackingParams
+                        clickTrackingParams = video.clickTrackingParams,
+                        isShorts = video.isShorts
                     )
                 },
                 onBack = {
@@ -625,7 +626,8 @@ fun MainTvShell(
                                     title = video.title,
                                     author = video.author,
                                     thumbnailUrl = video.thumbnailUrl,
-                                    clickTrackingParams = video.clickTrackingParams
+                                    clickTrackingParams = video.clickTrackingParams,
+                                    isShorts = video.isShorts
                                 )
                             }
                         )
@@ -639,7 +641,8 @@ fun MainTvShell(
                                     title = video.title,
                                     author = video.author,
                                     thumbnailUrl = video.thumbnailUrl,
-                                    clickTrackingParams = video.clickTrackingParams
+                                    clickTrackingParams = video.clickTrackingParams,
+                                    isShorts = video.isShorts
                                 )
                             },
                             onViewChannel = { channelName, channelId ->
@@ -663,7 +666,8 @@ fun MainTvShell(
                                     title = video.title,
                                     author = video.author,
                                     thumbnailUrl = video.thumbnailUrl,
-                                    clickTrackingParams = video.clickTrackingParams
+                                    clickTrackingParams = video.clickTrackingParams,
+                                    isShorts = video.isShorts
                                 )
                             }
                         )

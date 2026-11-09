@@ -21,6 +21,7 @@ data class VideoCardModel(
     val percentWatched: Int = 0,
     val isLive: Boolean = false,
     val isUpcoming: Boolean = false,
+    val isShorts: Boolean = false,
     val channelId: String? = null,
     val badgeText: String? = null,
     val clickTrackingParams: String? = null
@@ -42,6 +43,8 @@ data class VideoCardModel(
                 .ifEmpty { sanitizeUrl(item.backgroundImageUrl, item.videoId) }
 
             val (cleanedAuthor, cleanedSecondTitle) = cleanAuthorAndDetails(item.author, item.secondTitle?.toString())
+            val isShort = item.isShorts || 
+                (item.badgeText?.contains("short", ignoreCase = true) == true) 
 
             return VideoCardModel(
                 videoId = item.videoId ?: "",
@@ -55,6 +58,7 @@ data class VideoCardModel(
                 percentWatched = item.percentWatched,
                 isLive = item.isLive,
                 isUpcoming = item.isUpcoming,
+                isShorts = isShort,
                 channelId = item.channelId,
                 badgeText = item.badgeText,
                 clickTrackingParams = item.clickTrackingParams
@@ -138,6 +142,9 @@ data class SectionRowModel(
 ) {
     companion object {
         fun fromMediaGroup(group: MediaGroup): SectionRowModel {
+            val isShortsGroup = group.type == MediaGroup.TYPE_SHORTS ||
+                (group.title?.contains("shorts", ignoreCase = true) == true)
+
             val mediaItems = group.mediaItems
             val cards = if (mediaItems.isNullOrEmpty()) {
                 emptyList()
@@ -145,7 +152,8 @@ data class SectionRowModel(
                 val list = ArrayList<VideoCardModel>(mediaItems.size)
                 for (item in mediaItems) {
                     if (item != null && !item.videoId.isNullOrBlank()) {
-                        list.add(VideoCardModel.fromMediaItem(item))
+                        val card = VideoCardModel.fromMediaItem(item)
+                        list.add(if (isShortsGroup) card.copy(isShorts = true) else card)
                     }
                 }
                 list
@@ -161,6 +169,7 @@ data class SectionRowModel(
                 MediaGroup.TYPE_LIVE -> "Live Now"
                 MediaGroup.TYPE_SUBSCRIPTIONS -> "Subscriptions"
                 MediaGroup.TYPE_HISTORY -> "Watch History"
+                MediaGroup.TYPE_SHORTS -> "Shorts"
                 else -> "Recommended for You"
             }
 
@@ -223,13 +232,16 @@ data class VideoPlaybackMetadata(
                 for ((index, group) in metaSuggestions.withIndex()) {
                     val groupMediaItems = group?.mediaItems
                     if (!groupMediaItems.isNullOrEmpty()) {
+                        val isShortsGroup = group.type == MediaGroup.TYPE_SHORTS ||
+                            (group.title?.contains("shorts", ignoreCase = true) == true)
                         val groupCards = ArrayList<VideoCardModel>(groupMediaItems.size)
                         for (item in groupMediaItems) {
                             if (item != null && !item.videoId.isNullOrBlank()) {
                                 val card = VideoCardModel.fromMediaItem(item)
-                                groupCards.add(card)
-                                if (seenVideoIds.add(card.videoId)) {
-                                    suggestionCards.add(card)
+                                val finalCard = if (isShortsGroup) card.copy(isShorts = true) else card
+                                groupCards.add(finalCard)
+                                if (seenVideoIds.add(finalCard.videoId)) {
+                                    suggestionCards.add(finalCard)
                                 }
                             }
                         }

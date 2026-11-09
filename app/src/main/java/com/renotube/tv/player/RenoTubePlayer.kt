@@ -274,6 +274,7 @@ class RenoTubePlayer @Inject constructor(
         .setSeekForwardIncrementMs(10_000)    // YouTube standard: 10 s seek steps
         .setWakeMode(C.WAKE_MODE_NETWORK)     // Keep network awake while buffering in background
         .build().apply {
+            videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT // Explicitly ensure video frames fit viewport with native aspect ratio preserved (Shorts pillarboxing)
             // Master gain unity level (1.0f). Prevents premature audio attenuation on Sony TV at volume level 1
             volume = 1.0f
             addListener(object : Player.Listener {

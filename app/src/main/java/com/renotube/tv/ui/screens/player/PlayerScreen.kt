@@ -638,6 +638,7 @@ fun PlayerScreen(
                     descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                     subtitleView?.visibility = View.GONE // Hide internal uncentered subtitles
+                    resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
                     surfaceViewRef = videoSurfaceView
                     post {
                         if (surfaceViewRef == null) {
@@ -651,6 +652,7 @@ fun PlayerScreen(
             update = { playerView ->
                 playerView.player = viewModel.exoPlayer
                 playerView.keepScreenOn = true
+                playerView.resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
                 playerView.isFocusable = false
                 playerView.isFocusableInTouchMode = false
                 playerView.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
@@ -706,7 +708,8 @@ fun PlayerScreen(
                     AsyncImage(
                         model = previewImageRequest,
                         contentDescription = null,
-                        contentScale = ContentScale.Crop,
+                        contentScale = ContentScale.Fit,
+                        alignment = Alignment.Center,
                         modifier = Modifier.fillMaxSize()
                     )
                 }

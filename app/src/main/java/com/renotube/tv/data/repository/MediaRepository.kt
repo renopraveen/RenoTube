@@ -7,6 +7,7 @@ import com.renotube.tv.data.model.SponsorSegmentModel
 import com.renotube.tv.data.model.VideoPlaybackMetadata
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -104,6 +105,7 @@ class MediaRepository @Inject constructor(
     suspend fun getFormatInfo(videoId: String, clickTrackingParams: String? = null): MediaItemFormatInfo? =
         withContext(Dispatchers.IO) {
             isPlaybackActive = true
+            activePrefetchJob?.cancel() // Zero network contention for primary video startup
             val cached = formatCache[videoId]
             val now = System.currentTimeMillis()
             if (cached != null && (now - cached.first) < CACHE_TTL_MS && !cached.second.isUnplayable) {
@@ -243,8 +245,39 @@ class MediaRepository @Inject constructor(
     }
 
     suspend fun prefetchFormatInfo(videoId: String) = withContext(Dispatchers.IO) {
-        // Safe no-op on TV hardware to eliminate YouTube rate-limiting, nonce clashes and decoder contention
-        return@withContext
+        if (isPlaybackActive || isResolvingPrimaryStream) return@withContext
+        val cached = formatCache[videoId]
+        val now = System.currentTimeMillis()
+        if (cached != null && (now - cached.first) < CACHE_TTL_MS && !cached.second.isUnplayable) {
+            return@withContext
+        }
+
+        // Single-flight debounced prefetch: cancel any previous prefetch job
+        activePrefetchJob?.cancel()
+        activePrefetchJob = prefetchScope.launch {
+            try {
+                delay(200) // Debounce rapid D-pad moves
+                if (isPlaybackActive || isResolvingPrimaryStream) return@launch
+
+                val info = withTimeoutOrNull(6000) {
+                    mediaItemService.getFormatInfo(videoId)
+                }
+                if (info != null && !info.isUnplayable) {
+                    formatCache[videoId] = Pair(System.currentTimeMillis(), info)
+                    ambilightLowResUrl = extractLowResVideoStreamUrl(info)
+                    if (!info.containsHlsUrl()) {
+                        try {
+                            getOrGenerateMpdFile(info)
+                        } catch (_: Exception) {}
+                    }
+                    android.util.Log.d("MediaRepository", "Predictive prefetch successful for $videoId")
+                }
+            } catch (_: kotlinx.coroutines.CancellationException) {
+                // Cancelled due to rapid browsing
+            } catch (t: Throwable) {
+                android.util.Log.w("MediaRepository", "Prefetch failed for $videoId: ${t.message}")
+            }
+        }
     }
 
     suspend fun getMetadata(videoId: String): VideoPlaybackMetadata? = withContext(Dispatchers.IO) {

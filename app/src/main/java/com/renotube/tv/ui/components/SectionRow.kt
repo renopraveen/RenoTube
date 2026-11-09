@@ -43,6 +43,9 @@ fun SectionRow(
     // Enforce full, rich YouTube TV rows: never show stubby rows with fewer than 5 cards
     if (section.items.size < 5) return
 
+    val isShortsRow = section.type == com.liskovsoft.mediaserviceinterfaces.data.MediaGroup.TYPE_SHORTS ||
+        section.title.contains("shorts", ignoreCase = true)
+
     val rowListState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -73,17 +76,16 @@ fun SectionRow(
             itemsIndexed(
                 items = section.items,
                 key = { index, item -> "${section.title}_${item.videoId}_$index" },
-                contentType = { _, _ -> "video_card" }
+                contentType = { _, _ -> if (isShortsRow) "shorts_card" else "video_card" }
             ) { index, video ->
                 VideoCard(
                     video = video,
+                    cardWidth = if (isShortsRow) 168.dp else 296.dp,
+                    isShorts = isShortsRow || video.isShorts,
                     onClick = { onVideoClick(video) },
                     onLongClick = { onVideoLongClick?.invoke(video) },
                     onFocused = {
                         onVideoFocused?.invoke(video)
-                        if (index + 1 < section.items.size) {
-                            onNextVideoPrefetch?.invoke(section.items[index + 1])
-                        }
                         val targetIndex = (index - 2).coerceAtLeast(0)
                         val offsetPx = if (index <= 1) 0 else scrollOffsetPx
                         scrollJob?.cancel()
