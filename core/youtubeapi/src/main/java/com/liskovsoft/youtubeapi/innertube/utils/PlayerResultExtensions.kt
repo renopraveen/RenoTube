@@ -85,7 +85,7 @@ internal fun StreamingFormat.Range.toRangeString() = if (start == null || end ==
 
 const val TRANSLATE_MARKER = "*"
 private const val TYPE_ASR = "asr"
-var selectedCaptionFormat = CaptionFormat.TTML
+var selectedCaptionFormat = CaptionFormat.VTT
 
 internal fun CaptionTrack.getName(): String? {
     val name = name?.getText()

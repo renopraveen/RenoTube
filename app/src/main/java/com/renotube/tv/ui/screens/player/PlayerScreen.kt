@@ -237,6 +237,8 @@ fun PlayerScreen(
         }
     }
 
+    val cachedCuesRef = remember { java.util.concurrent.atomic.AtomicReference<List<Cue>>(emptyList()) }
+
     // Centered Subtitle Dispatcher & Video Format Cadence Lock
     DisposableEffect(viewModel.exoPlayer) {
         val playerListener = object : Player.Listener {
@@ -248,6 +250,7 @@ fun PlayerScreen(
                         .setPositionAnchor(Cue.ANCHOR_TYPE_MIDDLE)
                         .build()
                 }
+                cachedCuesRef.set(centeredCues)
                 subtitleViewRef?.setCues(centeredCues)
             }
 
@@ -676,6 +679,7 @@ fun PlayerScreen(
                     isFocusable = false
                     isFocusableInTouchMode = false
                     applySubtitleStyle(this, captionTextSizeSp, captionTextColorInt, captionBgColorInt)
+                    setCues(cachedCuesRef.get())
                     visibility = if (subtitlesEnabled) View.VISIBLE else View.GONE
                     subtitleViewRef = this
                 }
@@ -684,6 +688,9 @@ fun PlayerScreen(
                 subtitleViewRef = subView
                 subView.visibility = if (subtitlesEnabled) View.VISIBLE else View.GONE
                 applySubtitleStyle(subView, captionTextSizeSp, captionTextColorInt, captionBgColorInt)
+                if (subtitlesEnabled) {
+                    subView.setCues(cachedCuesRef.get())
+                }
             },
             modifier = Modifier.fillMaxSize()
         )

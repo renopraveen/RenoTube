@@ -11,6 +11,7 @@ import androidx.media3.common.MediaItem as Media3MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
@@ -32,7 +33,10 @@ import androidx.media3.exoplayer.mediacodec.DefaultMediaCodecAdapterFactory
 import androidx.media3.exoplayer.mediacodec.MediaCodecAdapter
 import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.util.EventLogger
 import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
@@ -783,44 +787,66 @@ class RenoTubePlayer @Inject constructor(
             .setTransferListener(bandwidthMeter)
     }
 
+    private fun formatSubtitleUrlToVtt(rawUrl: String): String {
+        var url = rawUrl
+        if (url.contains("fmt=")) {
+            url = url.replace(Regex("fmt=[^&]+"), "fmt=vtt")
+        } else {
+            val sep = if (url.contains("?")) "&" else "?"
+            url = "$url${sep}fmt=vtt"
+        }
+        return url
+    }
+
     private fun buildSubtitleConfigurations(formatInfo: MediaItemFormatInfo): List<Media3MediaItem.SubtitleConfiguration> {
         val configs = mutableListOf<Media3MediaItem.SubtitleConfiguration>()
         val subtitles = formatInfo.subtitles ?: return configs
 
-        var hasEnglish = false
+        var englishAdded = false
         var translatableSub: MediaSubtitle? = null
 
+        // 1. Search for direct English subtitle tracks (prioritize non-ASR uploaded captions over auto-generated)
+        val englishTracks = subtitles.filter { sub ->
+            val lang = sub.languageCode ?: ""
+            val url = sub.baseUrl ?: ""
+            lang.startsWith("en", ignoreCase = true) || url.contains("tlang=en")
+        }.sortedBy { sub ->
+            if (sub.type?.equals("asr", ignoreCase = true) == true || sub.name?.contains("auto", ignoreCase = true) == true) 1 else 0
+        }
+
         for (sub in subtitles) {
-            val url = sub.baseUrl ?: continue
-            val lang = sub.languageCode ?: "en"
-            val name = sub.name ?: "English"
-            if (lang.startsWith("en", ignoreCase = true)) {
-                hasEnglish = true
-            }
             if (sub.isTranslatable && translatableSub == null) {
                 translatableSub = sub
             }
+        }
 
-            val isDefault = lang.startsWith("en", ignoreCase = true)
+        for (sub in englishTracks) {
+            val rawUrl = sub.baseUrl ?: continue
+            val name = sub.name ?: "English"
+            val vttUrl = formatSubtitleUrlToVtt(rawUrl)
             try {
-                val config = Media3MediaItem.SubtitleConfiguration.Builder(Uri.parse(url))
+                val config = Media3MediaItem.SubtitleConfiguration.Builder(Uri.parse(vttUrl))
                     .setMimeType(MimeTypes.TEXT_VTT)
-                    .setLanguage(lang)
-                    .setLabel(name.ifEmpty { lang })
+                    .setLanguage("en")
+                    .setLabel(name.ifEmpty { "English" })
                     .setRoleFlags(C.ROLE_FLAG_CAPTION or C.ROLE_FLAG_SUBTITLE)
-                    .setSelectionFlags(if (isDefault) C.SELECTION_FLAG_DEFAULT else 0)
+                    .setSelectionFlags(if (!englishAdded) C.SELECTION_FLAG_DEFAULT else 0)
                     .build()
                 configs.add(config)
+                englishAdded = true
+                Log.i(TAG, "Attached English subtitle track ($name): $vttUrl")
+                break // Primary English track attached
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse subtitle track $lang: ${e.message}")
+                Log.w(TAG, "Failed to parse English subtitle track: ${e.message}")
             }
         }
 
-        // Auto-generate English captions if not present but video has translatable captions
-        if (!hasEnglish && translatableSub != null && !translatableSub.baseUrl.isNullOrEmpty()) {
-            val baseUrl = translatableSub.baseUrl
-            val sep = if (baseUrl.contains("?")) "&" else "?"
-            val autoEnUrl = "$baseUrl${sep}tlang=en"
+        // 2. If no direct English track found, synthesize an auto-translated English track from the translatable track
+        if (!englishAdded && translatableSub != null && !translatableSub.baseUrl.isNullOrEmpty()) {
+            val rawUrl = translatableSub.baseUrl!!
+            val vttUrl = formatSubtitleUrlToVtt(rawUrl)
+            val sep = if (vttUrl.contains("?")) "&" else "?"
+            val autoEnUrl = "$vttUrl${sep}tlang=en"
             try {
                 val autoEnConfig = Media3MediaItem.SubtitleConfiguration.Builder(Uri.parse(autoEnUrl))
                     .setMimeType(MimeTypes.TEXT_VTT)
@@ -830,13 +856,68 @@ class RenoTubePlayer @Inject constructor(
                     .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
                     .build()
                 configs.add(0, autoEnConfig)
-                Log.i(TAG, "Attached auto-generated English captions: $autoEnUrl")
+                englishAdded = true
+                Log.i(TAG, "Attached auto-translated English captions: $autoEnUrl")
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to attach auto-translated English captions: ${e.message}")
             }
         }
 
+        // 3. Attach up to 2 other native original tracks (non-translated, e.g. creator's native language)
+        var nonEnglishCount = 0
+        for (sub in subtitles) {
+            val rawUrl = sub.baseUrl ?: continue
+            val lang = sub.languageCode ?: continue
+            if (lang.startsWith("en", ignoreCase = true)) continue
+            // Skip synthetic translations to avoid network spam (100+ languages)
+            if (rawUrl.contains("tlang=")) continue
+            if (nonEnglishCount >= 2) break
+
+            val name = sub.name ?: lang
+            val vttUrl = formatSubtitleUrlToVtt(rawUrl)
+            try {
+                val config = Media3MediaItem.SubtitleConfiguration.Builder(Uri.parse(vttUrl))
+                    .setMimeType(MimeTypes.TEXT_VTT)
+                    .setLanguage(lang)
+                    .setLabel(name.ifEmpty { lang })
+                    .setRoleFlags(C.ROLE_FLAG_CAPTION or C.ROLE_FLAG_SUBTITLE)
+                    .setSelectionFlags(0)
+                    .build()
+                configs.add(config)
+                nonEnglishCount++
+                Log.i(TAG, "Attached native subtitle track ($lang - $name): $vttUrl")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to parse subtitle track $lang: ${e.message}")
+            }
+        }
+
         return configs
+    }
+
+    private fun wrapWithSubtitleSources(
+        baseSource: MediaSource,
+        subtitleConfigs: List<Media3MediaItem.SubtitleConfiguration>,
+        dataSourceFactory: DataSource.Factory
+    ): MediaSource {
+        if (subtitleConfigs.isEmpty()) return baseSource
+
+        val errorPolicy = FastFailoverLoadErrorHandlingPolicy()
+        val mediaSources = ArrayList<MediaSource>(subtitleConfigs.size + 1)
+        mediaSources.add(baseSource)
+
+        for (config in subtitleConfigs) {
+            try {
+                val subSource = SingleSampleMediaSource.Factory(dataSourceFactory)
+                    .setLoadErrorHandlingPolicy(errorPolicy)
+                    .setTreatLoadErrorsAsEndOfStream(true)
+                    .createMediaSource(config, C.TIME_UNSET)
+                mediaSources.add(subSource)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to create subtitle source for ${config.label}: ${e.message}")
+            }
+        }
+
+        return MergingMediaSource(*mediaSources.toTypedArray())
     }
 
     /**
@@ -900,11 +981,14 @@ class RenoTubePlayer @Inject constructor(
         return@withContext withContext(Dispatchers.Main) {
             exoPlayer.stop()
 
-            // Reset any previous per-video audio track overrides and guarantee default English audio
+            // Reset any previous per-video audio track overrides and guarantee default English audio & text tracks
             trackSelector.setParameters(
                 trackSelector.buildUponParameters()
                     .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
                     .setPreferredAudioLanguage(preferredAudioLanguage.ifBlank { "en" })
+                    .setPreferredTextLanguage("en")
+                    .setSelectUndeterminedTextLanguage(true)
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !subtitlesEnabled)
             )
             applyVideoResolution(manualResolutionHeight)
 
@@ -917,7 +1001,8 @@ class RenoTubePlayer @Inject constructor(
                         .setUri(hlsUrl)
                         .setSubtitleConfigurations(subtitleConfigs)
                         .build()
-                    val mediaSource = HlsMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+                    val baseSource = HlsMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+                    val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, dataSourceFactory)
                     exoPlayer.setMediaSource(mediaSource)
                     if (startPositionMs > 0) {
                         exoPlayer.seekTo(startPositionMs)
@@ -939,7 +1024,8 @@ class RenoTubePlayer @Inject constructor(
                         .setMimeType(MimeTypes.APPLICATION_MPD)
                         .setSubtitleConfigurations(subtitleConfigs)
                         .build()
-                    val mediaSource = DashMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+                    val baseSource = DashMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+                    val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, dataSourceFactory)
                     exoPlayer.setMediaSource(mediaSource)
                     if (startPositionMs > 0) {
                         exoPlayer.seekTo(startPositionMs)
@@ -959,7 +1045,8 @@ class RenoTubePlayer @Inject constructor(
                     .setUri(progressiveUrl)
                     .setSubtitleConfigurations(subtitleConfigs)
                     .build()
-                val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+                val baseSource = ProgressiveMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+                val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, dataSourceFactory)
                 exoPlayer.setMediaSource(mediaSource)
                 if (startPositionMs > 0) {
                     exoPlayer.seekTo(startPositionMs)
@@ -990,9 +1077,10 @@ class RenoTubePlayer @Inject constructor(
             .setUri(hlsUrl)
             .setSubtitleConfigurations(subtitleConfigs)
             .build()
-        val mediaSource = HlsMediaSource.Factory(dataSourceFactory)
+        val baseSource = HlsMediaSource.Factory(dataSourceFactory)
             .setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy())
             .createMediaSource(mediaItem)
+        val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, dataSourceFactory)
         exoPlayer.stop()
         exoPlayer.setMediaSource(mediaSource)
         if (startPositionMs > 0) {
@@ -1020,7 +1108,8 @@ class RenoTubePlayer @Inject constructor(
             .setUri(progressiveUrl)
             .setSubtitleConfigurations(subtitleConfigs)
             .build()
-        val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+        val baseSource = ProgressiveMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+        val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, dataSourceFactory)
         exoPlayer.stop()
         exoPlayer.setMediaSource(mediaSource)
         if (startPositionMs > 0) {
