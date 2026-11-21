@@ -7,6 +7,7 @@ import com.liskovsoft.mediaserviceinterfaces.data.MediaItemMetadata
 import com.liskovsoft.mediaserviceinterfaces.data.SponsorSegment
 
 private val SPLIT_REGEX = Regex("[•·|]")
+private val BADGE_WORDS = setOf("4k", "cc", "hd", "hdr", "uhd", "5.1", "live", "shorts", "premiere", "premieres", "new", "watched", "sponsored")
 
 @Immutable
 data class VideoCardModel(
@@ -82,17 +83,23 @@ data class VideoCardModel(
                 }
             } else emptyList()
 
-            val cleanAuthor = if (authorParts.isNotEmpty()) {
-                authorParts.firstOrNull { !it.startsWith("@") } ?: authorParts.firstOrNull() ?: ""
+            // Filter out non-author metadata badges (e.g. "4K", "CC", "HDR") that YouTube API sometimes exposes as author
+            val validAuthorParts = authorParts.filter { it.lowercase() !in BADGE_WORDS }
+
+            val cleanAuthor = if (validAuthorParts.isNotEmpty()) {
+                validAuthorParts.firstOrNull { !it.startsWith("@") } ?: validAuthorParts.firstOrNull() ?: ""
             } else {
-                // When author is not provided separately (e.g. search items), extract from secondTitle
+                // When author is not provided separately (e.g. search items or when rawAuthor was a badge like "4K"), extract from secondTitle
                 secondParts.firstOrNull { part ->
+                    val p = part.lowercase()
                     !part.startsWith("@") &&
+                    p !in BADGE_WORDS &&
                     !part.contains("view", ignoreCase = true) &&
                     !part.contains("ago", ignoreCase = true) &&
                     !part.contains("stream", ignoreCase = true) &&
-                    !part.all { it.isDigit() }
-                } ?: secondParts.firstOrNull() ?: ""
+                    !part.contains("sub", ignoreCase = true) &&
+                    !part.all { it.isDigit() || it == '.' || it == ',' }
+                } ?: ""
             }
 
             val cleanSecondParts = ArrayList<String>(secondParts.size)

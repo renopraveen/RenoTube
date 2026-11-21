@@ -112,10 +112,14 @@ class SearchViewModel @Inject constructor(
         }
 
         debounceJob = viewModelScope.launch(Dispatchers.IO) {
-            // Fast 150ms debounce for TV remote typing
-            delay(150)
-            val tags = contentRepository.getSearchSuggestions(newQuery)
-            _uiState.update { it.copy(suggestions = tags) }
+            try {
+                // Fast 150ms debounce for TV remote typing
+                delay(150)
+                val tags = contentRepository.getSearchSuggestions(newQuery)
+                _uiState.update { it.copy(suggestions = tags) }
+            } catch (_: Exception) {
+                // Best effort; ignore transient network drops while typing
+            }
         }
     }
 
@@ -123,44 +127,49 @@ class SearchViewModel @Inject constructor(
         if (searchQuery.isBlank()) return
         _uiState.update { it.copy(query = searchQuery, isSearching = true) }
         viewModelScope.launch(Dispatchers.IO) {
-            val rawResults = contentRepository.search(searchQuery)
-            val filteredCards = rawResults.flatMap { section ->
-                userHistoryRepository.filterBlocked(section.items)
-            }.filter { it.videoId.isNotBlank() }.distinctBy { it.videoId }.toMutableList()
+            try {
+                val rawResults = contentRepository.search(searchQuery)
+                val filteredCards = rawResults.flatMap { section ->
+                    userHistoryRepository.filterBlocked(section.items)
+                }.filter { it.videoId.isNotBlank() }.distinctBy { it.videoId }.toMutableList()
 
-            // If fewer than 50 results, fetch supplementary relevant results to aim for 50 top results
-            if (filteredCards.size < 50) {
-                try {
-                    val fallbackSearch = contentRepository.search("$searchQuery full video")
-                    val extra = fallbackSearch.flatMap { it.items }
-                        .filter { it.videoId.isNotBlank() && filteredCards.none { existing -> existing.videoId == it.videoId } }
-                    filteredCards.addAll(extra)
-                } catch (_: Exception) {}
-            }
+                // If fewer than 50 results, fetch supplementary relevant results to aim for 50 top results
+                if (filteredCards.size < 50) {
+                    try {
+                        val fallbackSearch = contentRepository.search("$searchQuery full video")
+                        val extra = fallbackSearch.flatMap { it.items }
+                            .filter { it.videoId.isNotBlank() && filteredCards.none { existing -> existing.videoId == it.videoId } }
+                        filteredCards.addAll(extra)
+                    } catch (_: Exception) {}
+                }
 
-            val top50 = filteredCards.take(50)
-            val fiveRows = mutableListOf<SectionRowModel>()
-            val r0 = top50.take(10)
-            val r1 = top50.drop(10).take(10)
-            val r2 = top50.drop(20).take(10)
-            val r3 = top50.drop(30).take(10)
-            val r4 = top50.drop(40).take(10)
+                val top50 = filteredCards.take(50)
+                val fiveRows = mutableListOf<SectionRowModel>()
+                val r0 = top50.take(10)
+                val r1 = top50.drop(10).take(10)
+                val r2 = top50.drop(20).take(10)
+                val r3 = top50.drop(30).take(10)
+                val r4 = top50.drop(40).take(10)
 
-            if (r0.isNotEmpty()) fiveRows.add(SectionRowModel(title = "Top Results", items = r0))
-            if (r1.isNotEmpty()) fiveRows.add(SectionRowModel(title = "More Results", items = r1))
-            if (r2.isNotEmpty()) fiveRows.add(SectionRowModel(title = "Related Videos", items = r2))
-            if (r3.isNotEmpty()) fiveRows.add(SectionRowModel(title = "Popular for \"$searchQuery\"", items = r3))
-            if (r4.isNotEmpty()) fiveRows.add(SectionRowModel(title = "Additional Matches", items = r4))
+                if (r0.isNotEmpty()) fiveRows.add(SectionRowModel(title = "Top Results", items = r0))
+                if (r1.isNotEmpty()) fiveRows.add(SectionRowModel(title = "More Results", items = r1))
+                if (r2.isNotEmpty()) fiveRows.add(SectionRowModel(title = "Related Videos", items = r2))
+                if (r3.isNotEmpty()) fiveRows.add(SectionRowModel(title = "Popular for \"$searchQuery\"", items = r3))
+                if (r4.isNotEmpty()) fiveRows.add(SectionRowModel(title = "Additional Matches", items = r4))
 
-            _uiState.update {
-                it.copy(
-                    searchResults = fiveRows,
-                    isSearching = false
-                )
-            }
-            // Prewarm first result for instantaneous playback
-            fiveRows.firstOrNull()?.items?.firstOrNull()?.videoId?.let { firstId ->
-                prefetchVideo(firstId)
+                _uiState.update {
+                    it.copy(
+                        searchResults = fiveRows,
+                        isSearching = false
+                    )
+                }
+                // Prewarm first result for instantaneous playback
+                fiveRows.firstOrNull()?.items?.firstOrNull()?.videoId?.let { firstId ->
+                    prefetchVideo(firstId)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SearchViewModel", "Search execution error: ${e.message}")
+                _uiState.update { it.copy(isSearching = false) }
             }
         }
     }

@@ -520,7 +520,12 @@ class ContentRepository @Inject constructor(
     }.flowOn(Dispatchers.IO)
 
     suspend fun getSearchSuggestions(query: String): List<String> = withContext(Dispatchers.IO) {
-        if (query.isBlank()) emptyList() else contentService.getSearchTags(query) ?: emptyList()
+        if (query.isBlank()) emptyList() else try {
+            contentService.getSearchTags(query) ?: emptyList()
+        } catch (e: Exception) {
+            android.util.Log.w("ContentRepository", "Failed to fetch search suggestions for '$query': ${e.message}")
+            emptyList()
+        }
     }
 
     /**
@@ -542,8 +547,13 @@ class ContentRepository @Inject constructor(
     }.flowOn(Dispatchers.IO)
 
     suspend fun search(query: String): List<SectionRowModel> = withContext(Dispatchers.IO) {
-        val groups = contentService.getSearch(query) ?: emptyList()
-        groups.map { SectionRowModel.fromMediaGroup(it) }
+        try {
+            val groups = contentService.getSearch(query) ?: emptyList()
+            groups.map { SectionRowModel.fromMediaGroup(it) }
+        } catch (e: Exception) {
+            android.util.Log.w("ContentRepository", "Search failed for '$query': ${e.message}")
+            emptyList()
+        }
     }
 
     /** History feed */

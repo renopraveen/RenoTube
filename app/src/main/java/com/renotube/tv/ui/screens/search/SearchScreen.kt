@@ -1046,7 +1046,7 @@ private fun SearchSectionRow(
     val rowState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
-    val scrollOffsetPx = remember(density) { with(density) { 120.dp.roundToPx() } }
+    val scrollOffsetPx = remember(density) { with(density) { 136.dp.roundToPx() } }
     var scrollJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     Column(
@@ -1064,7 +1064,7 @@ private fun SearchSectionRow(
 
         LazyRow(
             state = rowState,
-            contentPadding = PaddingValues(start = 16.dp, end = 96.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 64.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -1074,7 +1074,7 @@ private fun SearchSectionRow(
             ) { cIndex, video ->
                 VideoCard(
                     video = video,
-                    cardWidth = 220.dp,
+                    cardWidth = 260.dp,
                     focusRequester = if (cIndex == 0) firstResultFocusRequester else null,
                     onClick = { onVideoClick(video) },
                     onLongClick = { onVideoLongClick(video) },
