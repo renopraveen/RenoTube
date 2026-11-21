@@ -977,11 +977,9 @@ class RenoTubePlayer @Inject constructor(
         val subtitleConfigs = buildSubtitleConfigurations(formatInfo)
         val hlsUrl = if (formatInfo.containsHlsUrl()) formatInfo.hlsManifestUrl else null
 
-        // 2. Prepare DASH MPD atomically if HLS is unavailable
+        // 1. Prepare Local DASH MPD: Instant 0ms manifest preparation (direct segment range requests to Google Video CDN)
         val mpdFile = File(context.cacheDir, "manifest_${formatInfo.videoId}.mpd")
-        val mpdReady = if (!hlsUrl.isNullOrEmpty()) {
-            false // Prefer High-Res HLS: immune to 55s n-param 403 & 0ms disk write delay
-        } else if (mpdFile.exists() && mpdFile.length() > 200 && (System.currentTimeMillis() - mpdFile.lastModified()) < 2 * 60 * 1000L) {
+        val mpdReady = if (mpdFile.exists() && mpdFile.length() > 200 && (System.currentTimeMillis() - mpdFile.lastModified()) < 10 * 60 * 1000L) {
             true
         } else {
             val mpdStream = try {
@@ -1024,7 +1022,7 @@ class RenoTubePlayer @Inject constructor(
             formatInfo.createUrlList()?.firstOrNull { it.isNotEmpty() }
         } else null
 
-        // 3. Switch to Main thread to bind MediaSource to ExoPlayer
+        // 2. Switch to Main thread to bind MediaSource to ExoPlayer
         return@withContext withContext(Dispatchers.Main) {
             exoPlayer.stop()
 
@@ -1039,30 +1037,7 @@ class RenoTubePlayer @Inject constructor(
             )
             applyVideoResolution(manualResolutionHeight)
 
-            // 1. High-Resolution Apple HLS stream:
-            // Immune to YouTube 55-second n-param 403 errors, provides instant startup & full 4K UHD @ 60fps
-            if (!hlsUrl.isNullOrEmpty()) {
-                try {
-                    Log.i(TAG, "Playing via High-Res HLS Manifest: $hlsUrl with ${subtitleConfigs.size} caption track(s) (startPos=${startPositionMs}ms)")
-                    val mediaItem = Media3MediaItem.Builder()
-                        .setUri(hlsUrl)
-                        .setSubtitleConfigurations(subtitleConfigs)
-                        .build()
-                    val baseSource = HlsMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
-                    val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, subtitleDataSourceFactory, durationUs)
-                    exoPlayer.setMediaSource(mediaSource)
-                    if (startPositionMs > 0) {
-                        exoPlayer.seekTo(startPositionMs)
-                    }
-                    exoPlayer.prepare()
-                    exoPlayer.playWhenReady = true
-                    return@withContext true
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error preparing HLS stream, falling back to DASH MPD: ${e.message}")
-                }
-            }
-
-            // 2. Local DASH MPD (for non-HLS clients like ANDROID_VR, TV, etc.)
+            // 1. Instant Local DASH MPD: Zero network roundtrips for manifests!
             if (mpdReady) {
                 try {
                     Log.i(TAG, "Playing via local DASH MPD (${mpdFile.length()} bytes) with ${subtitleConfigs.size} caption track(s) (startPos=${startPositionMs}ms)")
@@ -1081,7 +1056,29 @@ class RenoTubePlayer @Inject constructor(
                     exoPlayer.playWhenReady = true
                     return@withContext true
                 } catch (e: Exception) {
-                    Log.w(TAG, "Error preparing DASH MPD: ${e.message}")
+                    Log.w(TAG, "Error preparing DASH MPD, falling back to HLS: ${e.message}")
+                }
+            }
+
+            // 2. High-Resolution Apple HLS stream (fallback if DASH MPD is not available):
+            if (!hlsUrl.isNullOrEmpty()) {
+                try {
+                    Log.i(TAG, "Playing via High-Res HLS Manifest: $hlsUrl with ${subtitleConfigs.size} caption track(s) (startPos=${startPositionMs}ms)")
+                    val mediaItem = Media3MediaItem.Builder()
+                        .setUri(hlsUrl)
+                        .setSubtitleConfigurations(subtitleConfigs)
+                        .build()
+                    val baseSource = HlsMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
+                    val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, subtitleDataSourceFactory, durationUs)
+                    exoPlayer.setMediaSource(mediaSource)
+                    if (startPositionMs > 0) {
+                        exoPlayer.seekTo(startPositionMs)
+                    }
+                    exoPlayer.prepare()
+                    exoPlayer.playWhenReady = true
+                    return@withContext true
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error preparing HLS stream: ${e.message}")
                 }
             }
 

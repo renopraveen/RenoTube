@@ -172,7 +172,7 @@ class MediaRepository @Inject constructor(
                     formatCache[videoId] = Pair(System.currentTimeMillis(), info!!)
                     ambilightLowResUrl = extractLowResVideoStreamUrl(info)
                     // Pre-generate MPD in cache so player doesn't block on disk write
-                    if (!info.containsHlsUrl()) {
+                    if (info.containsDashFormats() || info.containsSabrFormats()) {
                         try {
                             getOrGenerateMpdFile(info)
                         } catch (_: Exception) {}
@@ -300,7 +300,7 @@ class MediaRepository @Inject constructor(
                 if (info != null && !info.isUnplayable) {
                     formatCache[videoId] = Pair(System.currentTimeMillis(), info)
                     ambilightLowResUrl = extractLowResVideoStreamUrl(info)
-                    if (!info.containsHlsUrl()) {
+                    if (info.containsDashFormats() || info.containsSabrFormats()) {
                         try {
                             getOrGenerateMpdFile(info)
                         } catch (_: Exception) {}
