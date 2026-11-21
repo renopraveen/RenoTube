@@ -26,6 +26,18 @@ class MediaRepository @Inject constructor(
     private val formatCache = ConcurrentHashMap<String, Pair<Long, MediaItemFormatInfo>>()
     private val CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes cache: keep formats warm during browsing
 
+    private val inFlightJobs = ConcurrentHashMap<String, Deferred<MediaItemFormatInfo?>>()
+
+    @Volatile
+    var isPlaybackActive: Boolean = false
+
+    @Volatile
+    var isResolvingPrimaryStream: Boolean = false
+
+    private val prefetchScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
+    )
+
     var ambilightLowResUrl: String? = null
         private set
 
@@ -74,9 +86,11 @@ class MediaRepository @Inject constructor(
     }
 
     fun resetClientToDefault() {
-        inFlightJobs.values.forEach { it.cancel() }
-        inFlightJobs.clear()
-        formatCache.clear()
+        try {
+            inFlightJobs?.values?.forEach { it.cancel() }
+            inFlightJobs?.clear()
+        } catch (_: Exception) {}
+        formatCache?.clear()
         ambilightLowResUrl = null
         try {
             com.liskovsoft.youtubeapi.service.YouTubeServiceManager.instance().invalidateCache()
@@ -86,25 +100,15 @@ class MediaRepository @Inject constructor(
     }
 
     fun invalidateFormat(videoId: String) {
-        inFlightJobs.remove(videoId)?.cancel()
-        formatCache.remove(videoId)
+        try {
+            inFlightJobs?.remove(videoId)?.cancel()
+        } catch (_: Exception) {}
+        formatCache?.remove(videoId)
         try {
             File(context.cacheDir, "manifest_${videoId}.mpd").delete()
             File(context.cacheDir, "manifest_${videoId}.tmp").delete()
         } catch (_: Exception) {}
     }
-
-    private val inFlightJobs = ConcurrentHashMap<String, Deferred<MediaItemFormatInfo?>>()
-
-    @Volatile
-    var isPlaybackActive: Boolean = false
-
-    @Volatile
-    var isResolvingPrimaryStream: Boolean = false
-
-    private val prefetchScope = kotlinx.coroutines.CoroutineScope(
-        kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
-    )
 
     suspend fun getFormatInfo(videoId: String, clickTrackingParams: String? = null): MediaItemFormatInfo? =
         withContext(Dispatchers.IO) {
