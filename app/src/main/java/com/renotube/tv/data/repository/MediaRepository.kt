@@ -6,7 +6,9 @@ import com.liskovsoft.mediaserviceinterfaces.data.MediaItemFormatInfo
 import com.renotube.tv.data.model.SponsorSegmentModel
 import com.renotube.tv.data.model.VideoPlaybackMetadata
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -22,7 +24,7 @@ class MediaRepository @Inject constructor(
     private val mediaItemService: MediaItemService
 ) {
     private val formatCache = ConcurrentHashMap<String, Pair<Long, MediaItemFormatInfo>>()
-    private val CACHE_TTL_MS = 2 * 60 * 1000L // 2 minutes fresh cache to prevent stale nonces
+    private val CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes cache: keep formats warm during browsing
 
     var ambilightLowResUrl: String? = null
         private set
@@ -72,6 +74,8 @@ class MediaRepository @Inject constructor(
     }
 
     fun resetClientToDefault() {
+        inFlightJobs.values.forEach { it.cancel() }
+        inFlightJobs.clear()
         formatCache.clear()
         ambilightLowResUrl = null
         try {
@@ -82,6 +86,7 @@ class MediaRepository @Inject constructor(
     }
 
     fun invalidateFormat(videoId: String) {
+        inFlightJobs.remove(videoId)?.cancel()
         formatCache.remove(videoId)
         try {
             File(context.cacheDir, "manifest_${videoId}.mpd").delete()
@@ -89,7 +94,7 @@ class MediaRepository @Inject constructor(
         } catch (_: Exception) {}
     }
 
-    private val inFlightPrefetches = ConcurrentHashMap.newKeySet<String>()
+    private val inFlightJobs = ConcurrentHashMap<String, Deferred<MediaItemFormatInfo?>>()
 
     @Volatile
     var isPlaybackActive: Boolean = false
@@ -97,22 +102,41 @@ class MediaRepository @Inject constructor(
     @Volatile
     var isResolvingPrimaryStream: Boolean = false
 
-    private var activePrefetchJob: kotlinx.coroutines.Job? = null
     private val prefetchScope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
     )
 
     suspend fun getFormatInfo(videoId: String, clickTrackingParams: String? = null): MediaItemFormatInfo? =
         withContext(Dispatchers.IO) {
-            isPlaybackActive = true
-            activePrefetchJob?.cancel() // Zero network contention for primary video startup
+            // 1. Instant Cache Hit (0ms)
             val cached = formatCache[videoId]
             val now = System.currentTimeMillis()
             if (cached != null && (now - cached.first) < CACHE_TTL_MS && !cached.second.isUnplayable) {
                 ambilightLowResUrl = extractLowResVideoStreamUrl(cached.second)
+                android.util.Log.i("MediaRepository", "Format cache HIT for $videoId (instant 0ms startup)")
                 return@withContext cached.second
             }
-            
+
+            // 2. In-flight prefetch JOIN: If this video is already being fetched in the background, await it!
+            val existingJob = inFlightJobs[videoId]
+            if (existingJob != null && existingJob.isActive) {
+                android.util.Log.i("MediaRepository", "Joining active in-flight prefetch for $videoId")
+                try {
+                    val result = existingJob.await()
+                    if (result != null && !result.isUnplayable) {
+                        ambilightLowResUrl = extractLowResVideoStreamUrl(result)
+                        return@withContext result
+                    }
+                } catch (_: Throwable) {}
+            }
+
+            // 3. Cold Resolution: Cancel prefetch jobs for OTHER videos to dedicate 100% bandwidth to primary video
+            inFlightJobs.forEach { (id, job) ->
+                if (id != videoId && job.isActive) {
+                    job.cancel()
+                }
+            }
+
             isResolvingPrimaryStream = true
             try {
                 val start = System.currentTimeMillis()
@@ -121,7 +145,7 @@ class MediaRepository @Inject constructor(
                     info = withTimeoutOrNull(12000) {
                         mediaItemService.getFormatInfo(videoId, clickTrackingParams)
                     }
-                    
+
                     // If primary format timed out or returned unplayable, perform soft failover
                     if (info == null || info.isUnplayable) {
                         android.util.Log.w("MediaRepository", "Primary format unplayable for $videoId. Trying soft failover...")
@@ -141,9 +165,9 @@ class MediaRepository @Inject constructor(
                 com.renotube.tv.perf.PerformanceTracker.recordApiLatency("Resolve Stream", start, isSuccess = success)
 
                 if (success) {
-                    formatCache[videoId] = Pair(now, info!!)
+                    formatCache[videoId] = Pair(System.currentTimeMillis(), info!!)
                     ambilightLowResUrl = extractLowResVideoStreamUrl(info)
-                    // Skip synchronous MPD XML disk writing if stream has native Apple HLS manifest (saves ~200ms latency)
+                    // Pre-generate MPD in cache so player doesn't block on disk write
                     if (!info.containsHlsUrl()) {
                         try {
                             getOrGenerateMpdFile(info)
@@ -245,19 +269,26 @@ class MediaRepository @Inject constructor(
     }
 
     suspend fun prefetchFormatInfo(videoId: String) = withContext(Dispatchers.IO) {
-        if (isPlaybackActive || isResolvingPrimaryStream) return@withContext
+        if (videoId.isBlank() || isResolvingPrimaryStream) return@withContext
         val cached = formatCache[videoId]
         val now = System.currentTimeMillis()
         if (cached != null && (now - cached.first) < CACHE_TTL_MS && !cached.second.isUnplayable) {
             return@withContext
         }
 
-        // Single-flight debounced prefetch: cancel any previous prefetch job
-        activePrefetchJob?.cancel()
-        activePrefetchJob = prefetchScope.launch {
+        val existing = inFlightJobs[videoId]
+        if (existing != null && existing.isActive) {
+            return@withContext
+        }
+
+        // Limit concurrent background prefetch to at most 2 jobs to keep TV Wi-Fi light
+        val activeCount = inFlightJobs.values.count { it.isActive }
+        if (activeCount >= 2) return@withContext
+
+        val job = prefetchScope.async {
             try {
-                delay(200) // Debounce rapid D-pad moves
-                if (isPlaybackActive || isResolvingPrimaryStream) return@launch
+                delay(80) // 80ms debounce for rapid navigation
+                if (isResolvingPrimaryStream) return@async null
 
                 val info = withTimeoutOrNull(6000) {
                     mediaItemService.getFormatInfo(videoId)
@@ -272,12 +303,17 @@ class MediaRepository @Inject constructor(
                     }
                     android.util.Log.d("MediaRepository", "Predictive prefetch successful for $videoId")
                 }
+                info
             } catch (_: kotlinx.coroutines.CancellationException) {
-                // Cancelled due to rapid browsing
+                null
             } catch (t: Throwable) {
                 android.util.Log.w("MediaRepository", "Prefetch failed for $videoId: ${t.message}")
+                null
+            } finally {
+                inFlightJobs.remove(videoId)
             }
         }
+        inFlightJobs[videoId] = job
     }
 
     suspend fun getMetadata(videoId: String): VideoPlaybackMetadata? = withContext(Dispatchers.IO) {

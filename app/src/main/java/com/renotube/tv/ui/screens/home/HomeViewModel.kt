@@ -113,8 +113,10 @@ class HomeViewModel @Inject constructor(
     }
 
     fun prefetchVideos(videoIds: List<String>) {
-        val first = videoIds.firstOrNull { it.isNotBlank() } ?: return
-        prefetchVideo(first)
+        val validIds = videoIds.filter { it.isNotBlank() }.take(2)
+        for (id in validIds) {
+            prefetchVideo(id)
+        }
     }
 
     init {

@@ -285,11 +285,13 @@ class RenoTubePlayer @Inject constructor(
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     if (playbackState == Player.STATE_READY) {
                         com.renotube.tv.perf.PerformanceTracker.onStreamReady()
+                        onPlaybackReadyListener?.invoke()
                     }
                 }
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     if (isPlaying) {
                         com.renotube.tv.perf.PerformanceTracker.onStreamReady()
+                        onPlaybackReadyListener?.invoke()
                     }
                 }
             })
@@ -692,6 +694,7 @@ class RenoTubePlayer @Inject constructor(
     var onErrorListener: ((PlaybackException) -> Unit)? = null
     var onPlaybackEndedListener: (() -> Unit)? = null
     var onFirstFrameRenderedListener: (() -> Unit)? = null
+    var onPlaybackReadyListener: (() -> Unit)? = null
 
     init {
         // Asynchronously clean up stale manifest files once on app startup in background

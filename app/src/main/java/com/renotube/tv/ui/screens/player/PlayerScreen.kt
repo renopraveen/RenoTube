@@ -165,6 +165,7 @@ fun PlayerScreen(
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
+    val currentMetadata = uiState.metadata?.takeIf { it.videoId.isBlank() || it.videoId == uiState.videoId }
     var selectedVideoForAction by remember { mutableStateOf<VideoCardModel?>(null) }
     val ambilightConfig by viewModel.ambilightConfig.collectAsState()
     val autoplayEnabled by viewModel.autoplayEnabled.collectAsState()
@@ -742,8 +743,8 @@ fun PlayerScreen(
                         .align(Alignment.BottomStart)
                         .padding(start = 56.dp, bottom = 56.dp)
                 ) {
-                    val dispTitle = uiState.metadata?.title?.takeIf { it.isNotBlank() } ?: uiState.initialTitle
-                    val dispAuthor = uiState.metadata?.author?.takeIf { it.isNotBlank() } ?: uiState.initialAuthor
+                    val dispTitle = currentMetadata?.title?.takeIf { it.isNotBlank() } ?: uiState.initialTitle
+                    val dispAuthor = currentMetadata?.author?.takeIf { it.isNotBlank() } ?: uiState.initialAuthor
 
                     if (dispTitle.isNotBlank()) {
                         Text(
@@ -918,8 +919,13 @@ fun PlayerScreen(
                     )
                     Spacer(modifier = Modifier.width(16.dp))
 
+                    val infoTitle = currentMetadata?.title?.takeIf { it.isNotBlank() } ?: uiState.initialTitle.ifBlank { uiState.videoId }
+                    val infoAuthor = currentMetadata?.author?.takeIf { it.isNotBlank() } ?: uiState.initialAuthor
+                    val infoViews = currentMetadata?.viewCount ?: ""
+                    val infoSubtitle = if (infoViews.isNotBlank()) "$infoAuthor • $infoViews" else infoAuthor
+
                     AsyncImage(
-                        model = uiState.metadata?.authorAvatarUrl,
+                        model = currentMetadata?.authorAvatarUrl,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
@@ -930,7 +936,7 @@ fun PlayerScreen(
                     Spacer(modifier = Modifier.width(14.dp))
                     Column {
                         Text(
-                            text = uiState.metadata?.title ?: uiState.videoId,
+                            text = infoTitle,
                             color = YouTubeWhite,
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold,
@@ -938,7 +944,7 @@ fun PlayerScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${uiState.metadata?.author ?: ""} • ${uiState.metadata?.viewCount ?: ""}",
+                            text = infoSubtitle,
                             color = YouTubeSecondaryText,
                             fontSize = 12.sp
                         )
@@ -951,7 +957,7 @@ fun PlayerScreen(
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                 ) {
-                    val chapters = uiState.metadata?.chapters ?: emptyList()
+                    val chapters = currentMetadata?.chapters ?: emptyList()
                     val activeChapter = chapters.lastOrNull { it.startTimeMs <= uiState.currentPositionMs }
 
                     val effectivePositionMs = if (isDraggingScrubber) {
@@ -1413,14 +1419,14 @@ fun PlayerScreen(
         // ── YouTube TV-Style Up Next Right Panel (osdLevel == 2) ─────────────────
         // Overlaid as a sibling of the player/OSD, so it fills the full screen height
         // and floats on the right side exactly like the official YouTube TV app.
-        if ((osdLevel == 2) && uiState.metadata?.suggestions?.isNotEmpty() == true) {
+        if ((osdLevel == 2) && currentMetadata?.suggestions?.isNotEmpty() == true) {
             val allSuggestions = run {
                 val seenIds = HashSet<String>()
-                val currentId = uiState.metadata?.videoId ?: uiState.videoId
+                val currentId = currentMetadata.videoId.ifBlank { uiState.videoId }
                 if (currentId.isNotBlank()) seenIds.add(currentId)
-                uiState.metadata?.suggestions?.filter {
+                currentMetadata.suggestions.filter {
                     it.videoId.isNotBlank() && seenIds.add(it.videoId)
-                } ?: emptyList()
+                }
             }
 
             // FocusRequesters: one per card (up to 30)

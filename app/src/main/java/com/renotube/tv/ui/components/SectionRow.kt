@@ -86,6 +86,9 @@ fun SectionRow(
                     onLongClick = { onVideoLongClick?.invoke(video) },
                     onFocused = {
                         onVideoFocused?.invoke(video)
+                        section.items.getOrNull(index + 1)?.let { nextCard ->
+                            onNextVideoPrefetch?.invoke(nextCard)
+                        }
                         val targetIndex = (index - 2).coerceAtLeast(0)
                         val offsetPx = if (index <= 1) 0 else scrollOffsetPx
                         scrollJob?.cancel()

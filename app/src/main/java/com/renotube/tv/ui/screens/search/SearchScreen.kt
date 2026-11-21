@@ -389,6 +389,9 @@ fun SearchScreen(
                             onVideoLongClick = { selectedVideoForAction = it },
                             onVideoFocused = { cIndex, video ->
                                 viewModel.prefetchVideo(video.videoId)
+                                section.items.getOrNull(cIndex + 1)?.let { nextVideo ->
+                                    viewModel.prefetchVideo(nextVideo.videoId)
+                                }
                                 isKeyboardMinimized = true
                                 coroutineScope.launch {
                                     searchListState.animateScrollToItem(rIndex)

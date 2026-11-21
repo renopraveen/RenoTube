@@ -329,9 +329,14 @@ class PlayerViewModel @Inject constructor(
     }
 
     init {
-        // Fast time-to-first-frame: notify UI the exact millisecond video rendering begins
+        // Fast time-to-first-frame: notify UI the exact millisecond video rendering or buffer readiness begins
+        renoTubePlayer.onPlaybackReadyListener = {
+            _uiState.update { it.copy(isFirstFrameRendered = true, isLoading = false) }
+            mediaRepository.isPlaybackActive = false
+        }
         renoTubePlayer.onFirstFrameRenderedListener = {
             _uiState.update { it.copy(isFirstFrameRendered = true, isLoading = false) }
+            mediaRepository.isPlaybackActive = false
         }
 
         // Smart Dynamic Surface & Resolution Controller: optimizes resolution when Ambilight is active
@@ -566,6 +571,12 @@ class PlayerViewModel @Inject constructor(
                 initialTitle = title,
                 initialAuthor = author,
                 initialThumbnail = thumbnailUrl,
+                metadata = null, // Immediately wipe previous video's metadata to prevent stale title flash!
+                sponsorSegments = emptyList(),
+                isLiveStream = false,
+                currentPositionMs = startPositionMs,
+                durationMs = 0L,
+                lastSkippedSegment = null,
                 isShorts = isShorts,
                 isFirstFrameRendered = false,
                 isLoading = true,
@@ -614,6 +625,7 @@ class PlayerViewModel @Inject constructor(
                     if (startPositionMs > 0) {
                         renoTubePlayer.seekTo(startPositionMs)
                     }
+                    mediaRepository.isPlaybackActive = false // Video stream handed to ExoPlayer: allow background prefetch
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -795,9 +807,20 @@ class PlayerViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 videoId = "",
+                initialTitle = "",
+                initialAuthor = "",
+                initialThumbnail = "",
+                metadata = null,
+                sponsorSegments = emptyList(),
+                isLiveStream = false,
+                currentPositionMs = 0L,
+                durationMs = 0L,
+                lastSkippedSegment = null,
                 isPlaying = false,
                 isLoading = false,
-                isOsdVisible = false
+                isOsdVisible = false,
+                isFirstFrameRendered = false,
+                errorMessage = null
             )
         }
         resetAmbilightToWarmWhite()
