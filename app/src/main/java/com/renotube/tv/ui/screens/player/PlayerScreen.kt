@@ -165,7 +165,7 @@ fun PlayerScreen(
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
-    val currentMetadata = uiState.metadata?.takeIf { it.videoId.isBlank() || it.videoId == uiState.videoId }
+    val currentMetadata = uiState.metadata?.takeIf { it.videoId == uiState.videoId }
     var selectedVideoForAction by remember { mutableStateOf<VideoCardModel?>(null) }
     val ambilightConfig by viewModel.ambilightConfig.collectAsState()
     val autoplayEnabled by viewModel.autoplayEnabled.collectAsState()

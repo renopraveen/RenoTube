@@ -273,7 +273,7 @@ class MediaRepository @Inject constructor(
     }
 
     suspend fun prefetchFormatInfo(videoId: String) = withContext(Dispatchers.IO) {
-        if (videoId.isBlank() || isResolvingPrimaryStream) return@withContext
+        if (videoId.isBlank() || isResolvingPrimaryStream || isPlaybackActive) return@withContext
         val cached = formatCache[videoId]
         val now = System.currentTimeMillis()
         if (cached != null && (now - cached.first) < CACHE_TTL_MS && !cached.second.isUnplayable) {
@@ -292,7 +292,7 @@ class MediaRepository @Inject constructor(
         val job = prefetchScope.async {
             try {
                 delay(80) // 80ms debounce for rapid navigation
-                if (isResolvingPrimaryStream) return@async null
+                if (isResolvingPrimaryStream || isPlaybackActive) return@async null
 
                 val info = withTimeoutOrNull(6000) {
                     mediaItemService.getFormatInfo(videoId)
@@ -322,7 +322,8 @@ class MediaRepository @Inject constructor(
 
     suspend fun getMetadata(videoId: String): VideoPlaybackMetadata? = withContext(Dispatchers.IO) {
         val meta = mediaItemService.getMetadata(videoId) ?: return@withContext null
-        VideoPlaybackMetadata.fromMediaItemMetadata(meta)
+        val mapped = VideoPlaybackMetadata.fromMediaItemMetadata(meta)
+        if (mapped.videoId.isBlank()) mapped.copy(videoId = videoId) else mapped
     }
 
     suspend fun getSponsorSegments(videoId: String): List<SponsorSegmentModel> = withContext(Dispatchers.IO) {

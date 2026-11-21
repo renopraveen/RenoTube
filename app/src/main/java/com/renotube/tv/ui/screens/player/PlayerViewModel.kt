@@ -625,7 +625,6 @@ class PlayerViewModel @Inject constructor(
                     if (startPositionMs > 0) {
                         renoTubePlayer.seekTo(startPositionMs)
                     }
-                    mediaRepository.isPlaybackActive = false // Video stream handed to ExoPlayer: allow background prefetch
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -668,10 +667,10 @@ class PlayerViewModel @Inject constructor(
                     }
                 }
 
-                // 3. Fetch metadata, SponsorBlock & recommendations in background after giving ExoPlayer full priority to paint frame 1
+                // 3. Fetch metadata, SponsorBlock & recommendations in background STRICTLY after ExoPlayer has painted frame 1
                 viewModelScope.launch(Dispatchers.IO) {
                     var waited = 0
-                    while (waited < 1500 && !_uiState.value.isFirstFrameRendered) {
+                    while (!_uiState.value.isFirstFrameRendered && waited < 10000) {
                         kotlinx.coroutines.delay(100)
                         waited += 100
                     }

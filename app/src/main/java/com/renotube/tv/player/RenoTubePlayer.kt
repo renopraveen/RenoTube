@@ -124,7 +124,7 @@ class RenoTubePlayer @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     private val bandwidthMeter = DefaultBandwidthMeter.Builder(context)
-        .setInitialBitrateEstimate(50_000_000L) // Fast 4K TV startup: 50 Mbps ensures immediate 4K/1080p selection on 1st frame
+        .setInitialBitrateEstimate(2_500_000L) // Instant startup: 2.5 Mbps selects lightweight chunk 0 for <200ms TTFF, then ABR ramps up to 4K
         .build()
 
     val hardware4kCodecSelector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
@@ -232,9 +232,9 @@ class RenoTubePlayer @Inject constructor(
     private val loadControl = DefaultLoadControl.Builder()
         .setAllocator(DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
         .setBufferDurationsMs(
-            /* minBufferMs = */ 2_500,            // 2.5 s buffer for stable TV playback without underflows
+            /* minBufferMs = */ 1_500,            // 1.5 s min buffer allows rapid startup
             /* maxBufferMs = */ 25_000,           // Buffer up to 25 s ahead
-            /* bufferForPlaybackMs = */ 250,      // 250 ms instant playback threshold for rapid 1st frame rendering
+            /* bufferForPlaybackMs = */ 100,      // 100 ms instant playback threshold for rapid 1st frame rendering
             /* bufferForPlaybackAfterRebufferMs = */ 1_000  // 1 s recovery from stalls
         )
         .setTargetBufferBytes(32 * 1024 * 1024)  // 32 MB target: optimal for 1080p/4K on Android TV
@@ -253,7 +253,7 @@ class RenoTubePlayer @Inject constructor(
                     MimeTypes.VIDEO_AV1,
                     MimeTypes.VIDEO_H264
                 )
-                .setForceHighestSupportedBitrate(true) // Prefer highest available bitrate on 4K TV
+                .setForceHighestSupportedBitrate(false) // Enable adaptive bitrate for instant first frame startup
                 .setTunnelingEnabled(false)
                 .setPreferredAudioLanguage("en") // English audio is always preferred by default
                 .setPreferredTextLanguage("en")
@@ -546,7 +546,7 @@ class RenoTubePlayer @Inject constructor(
                             .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
                             .addOverride(override)
                             .clearVideoSizeConstraints()
-                            .setForceHighestSupportedBitrate(targetHeight >= 2160)
+                            .setForceHighestSupportedBitrate(false)
                             .setTunnelingEnabled(false)
                     )
                     val selectedFormat = bestGroup.mediaTrackGroup.getFormat(bestTrackIndex)
@@ -555,14 +555,14 @@ class RenoTubePlayer @Inject constructor(
                 }
             }
 
-            // Default / Auto (no override): Unconstrained 4K UHD @ 60fps HDR
+            // Default / Auto (no override): Unconstrained 4K UHD @ 60fps HDR with adaptive startup
             trackSelector.setParameters(
                 trackSelector.buildUponParameters()
                     .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
                     .clearVideoSizeConstraints()
                     .setMaxVideoSize(4096, 2160)
                     .setMaxVideoFrameRate(60)
-                    .setForceHighestSupportedBitrate(true)
+                    .setForceHighestSupportedBitrate(false)
                     .setTunnelingEnabled(false)
                     .setPreferredVideoMimeTypes(
                         MimeTypes.VIDEO_VP9,
@@ -571,7 +571,7 @@ class RenoTubePlayer @Inject constructor(
                         MimeTypes.VIDEO_H264
                     )
             )
-            Log.i(TAG, "Native 4K Performance: Unconstrained 4K UHD @ 60fps (forceHighestSupportedBitrate=true, tunneling=false)")
+            Log.i(TAG, "Native 4K Performance: Unconstrained 4K UHD @ 60fps (adaptive startup, forceHighestSupportedBitrate=false)")
         } catch (e: Exception) {
             Log.w(TAG, "Error applying video resolution: ${e.message}")
         }
@@ -812,6 +812,28 @@ class RenoTubePlayer @Inject constructor(
             .setTransferListener(bandwidthMeter)
     }
 
+    private fun createSubtitleDataSourceFactory(formatInfo: MediaItemFormatInfo?): DataSource.Factory {
+        val rawUa = formatInfo?.clientInfo?.userAgent?.takeIf { it.isNotEmpty() }
+            ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        val userAgent = if (rawUa.endsWith(" gzip")) rawUa.removeSuffix(" gzip").trim() else rawUa
+
+        val headers = mutableMapOf<String, String>()
+        headers["User-Agent"] = userAgent
+
+        formatInfo?.visitorCookie?.takeIf { it.isNotEmpty() }?.let {
+            headers["Cookie"] = it
+        }
+
+        val httpFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(userAgent)
+            .setDefaultRequestProperties(headers)
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(4_000)
+            .setReadTimeoutMs(6_000)
+
+        return DefaultDataSource.Factory(context, httpFactory)
+    }
+
     private fun formatSubtitleUrlToVtt(rawUrl: String): String {
         var url = rawUrl
         if (url.contains("fmt=")) {
@@ -951,6 +973,7 @@ class RenoTubePlayer @Inject constructor(
      */
     suspend fun playFormatInfo(formatInfo: MediaItemFormatInfo, startPositionMs: Long = 0L): Boolean = withContext(Dispatchers.IO) {
         val dataSourceFactory = createDataSourceFactory(formatInfo)
+        val subtitleDataSourceFactory = createSubtitleDataSourceFactory(formatInfo)
         val subtitleConfigs = buildSubtitleConfigurations(formatInfo)
         val hlsUrl = if (formatInfo.containsHlsUrl()) formatInfo.hlsManifestUrl else null
 
@@ -1026,7 +1049,7 @@ class RenoTubePlayer @Inject constructor(
                         .setSubtitleConfigurations(subtitleConfigs)
                         .build()
                     val baseSource = HlsMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
-                    val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, dataSourceFactory, durationUs)
+                    val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, subtitleDataSourceFactory, durationUs)
                     exoPlayer.setMediaSource(mediaSource)
                     if (startPositionMs > 0) {
                         exoPlayer.seekTo(startPositionMs)
@@ -1049,7 +1072,7 @@ class RenoTubePlayer @Inject constructor(
                         .setSubtitleConfigurations(subtitleConfigs)
                         .build()
                     val baseSource = DashMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
-                    val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, dataSourceFactory, durationUs)
+                    val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, subtitleDataSourceFactory, durationUs)
                     exoPlayer.setMediaSource(mediaSource)
                     if (startPositionMs > 0) {
                         exoPlayer.seekTo(startPositionMs)
@@ -1070,7 +1093,7 @@ class RenoTubePlayer @Inject constructor(
                     .setSubtitleConfigurations(subtitleConfigs)
                     .build()
                 val baseSource = ProgressiveMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
-                val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, dataSourceFactory, durationUs)
+                val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, subtitleDataSourceFactory, durationUs)
                 exoPlayer.setMediaSource(mediaSource)
                 if (startPositionMs > 0) {
                     exoPlayer.seekTo(startPositionMs)
@@ -1096,6 +1119,7 @@ class RenoTubePlayer @Inject constructor(
 
         Log.w(TAG, "DASH stream error. Falling back immediately to High-Res HLS stream: $hlsUrl at ${startPositionMs}ms")
         val dataSourceFactory = createDataSourceFactory(formatInfo)
+        val subtitleDataSourceFactory = createSubtitleDataSourceFactory(formatInfo)
         val subtitleConfigs = buildSubtitleConfigurations(formatInfo)
         val mediaItem = Media3MediaItem.Builder()
             .setUri(hlsUrl)
@@ -1104,7 +1128,7 @@ class RenoTubePlayer @Inject constructor(
         val baseSource = HlsMediaSource.Factory(dataSourceFactory)
             .setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy())
             .createMediaSource(mediaItem)
-        val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, dataSourceFactory)
+        val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, subtitleDataSourceFactory)
         exoPlayer.stop()
         exoPlayer.setMediaSource(mediaSource)
         if (startPositionMs > 0) {
@@ -1127,13 +1151,14 @@ class RenoTubePlayer @Inject constructor(
         }
         Log.w(TAG, "All high-res streams failed. Falling back to Progressive MP4 stream: $progressiveUrl at ${startPositionMs}ms")
         val dataSourceFactory = createDataSourceFactory(formatInfo)
+        val subtitleDataSourceFactory = createSubtitleDataSourceFactory(formatInfo)
         val subtitleConfigs = buildSubtitleConfigurations(formatInfo)
         val mediaItem = Media3MediaItem.Builder()
             .setUri(progressiveUrl)
             .setSubtitleConfigurations(subtitleConfigs)
             .build()
         val baseSource = ProgressiveMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(FastFailoverLoadErrorHandlingPolicy()).createMediaSource(mediaItem)
-        val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, dataSourceFactory)
+        val mediaSource = wrapWithSubtitleSources(baseSource, subtitleConfigs, subtitleDataSourceFactory)
         exoPlayer.stop()
         exoPlayer.setMediaSource(mediaSource)
         if (startPositionMs > 0) {
